@@ -1,0 +1,1045 @@
+//! Onchain Footprint — wasm frontend (Rust).
+//!
+//! Fully imperative: the static layout lives in index.html; this module owns
+//! the state, the realtime WebSocket to the Rust backend, all DOM updates and
+//! the canvas render loop. Pure Rust → wasm via wasm-bindgen / web-sys.
+
+mod canvas;
+mod ui;
+
+use std::cell::RefCell;
+use std::collections::{BTreeMap, VecDeque};
+
+use shared::{
+    window_start, AssetInfo, Candle, FootWindow, FootprintSnapshot, LevelAgg, LevelDetail,
+    LiveLiquidation, LiveTrade, TraderRow,
+};
+use wasm_bindgen::{closure::Closure, prelude::wasm_bindgen, JsCast, JsValue};
+use web_sys::{MessageEvent, WebSocket};
+
+use crate::ui::fmt_px;
+
+// ---------------------------------------------------------------------------
+// state
+// ---------------------------------------------------------------------------
+
+pub struct AppState {
+    pub coin: String,
+    pub interval: i64,
+    pub assets: Vec<AssetInfo>,
+    /// trade-derived footprint windows (sorted by t), updated live
+    pub windows: Vec<FootWindow>,
+    /// candle-only display for windows with no flow yet
+    pub candle_gaps: BTreeMap<i64, Candle>,
+    pub bucket: f64,
+    pub tick: f64,
+    pub tape: VecDeque<LiveTrade>,
+    pub traders: Vec<TraderRow>,
+    pub liqs: VecDeque<LiveLiquidation>,
+    pub last_px: f64,
+    pub dirty: bool,
+    pub mouse: Option<(f64, f64)>,
+    pub ws_open: bool,
+    pub upstream: bool,
+    pub poll_mode: bool,
+    pub fails: u32,
+    pub last_ws_try: f64,
+    pub last_draw: f64,
+    pub last_tt: f64,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        AppState {
+            coin: "BTC".into(),
+            interval: 60_000,
+            assets: Vec::new(),
+            windows: Vec::new(),
+            candle_gaps: BTreeMap::new(),
+            bucket: 0.0,
+            tick: 0.0,
+            tape: VecDeque::new(),
+            traders: Vec::new(),
+            liqs: VecDeque::new(),
+            last_px: 0.0,
+            dirty: true,
+            mouse: None,
+            ws_open: false,
+            upstream: false,
+            poll_mode: false,
+            fails: 0,
+            last_ws_try: 0.0,
+            last_draw: 0.0,
+            last_tt: 0.0,
+        }
+    }
+}
+
+thread_local! {
+    static STATE: RefCell<AppState> = RefCell::new(AppState::default());
+    static WS: RefCell<Option<WebSocket>> = const { RefCell::new(None) };
+    static CANVAS: RefCell<Option<web_sys::HtmlCanvasElement>> = const { RefCell::new(None) };
+    static RAF: RefCell<Option<Closure<dyn FnMut()>>> = RefCell::new(None);
+    static TIMERS: RefCell<Vec<gloo_timers::callback::Interval>> = const { RefCell::new(Vec::new()) };
+}
+
+fn now() -> f64 {
+    js_sys::Date::now()
+}
+
+fn doc() -> web_sys::Document {
+    web_sys::window().unwrap().document().unwrap()
+}
+
+fn el<T: JsCast>(id: &str) -> T {
+    doc()
+        .get_element_by_id(id)
+        .unwrap_or_else(|| panic!("no #{id}"))
+        .dyn_into::<T>()
+        .unwrap()
+}
+
+fn set_text(id: &str, s: &str) {
+    el::<web_sys::Element>(id).set_text_content(Some(s));
+}
+
+fn every(ms: u32, f: impl Fn() + 'static) {
+    let i = gloo_timers::callback::Interval::new(ms, f);
+    TIMERS.with(|t| t.borrow_mut().push(i));
+}
+
+// ---------------------------------------------------------------------------
+// fetch helper
+// ---------------------------------------------------------------------------
+
+fn fetch_json(url: String, cb: impl Fn(serde_json::Value) + 'static) {
+    let w = web_sys::window().unwrap();
+    let p = w.fetch_with_str(&url);
+    let cb = std::rc::Rc::new(cb);
+    let on_resp = Closure::<dyn FnMut(JsValue)>::new(move |resp: JsValue| {
+        let r: web_sys::Response = resp.unchecked_into();
+        let p2 = match r.text() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let cb2 = cb.clone();
+        let on_text = Closure::<dyn FnMut(JsValue)>::new(move |txt: JsValue| {
+            if let Some(s) = txt.as_string() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                    cb2(v);
+                }
+            }
+        });
+        let _ = p2.then(&on_text);
+        on_text.forget();
+    });
+    let _ = p.then(&on_resp);
+    on_resp.forget();
+}
+
+// ---------------------------------------------------------------------------
+// websocket
+// ---------------------------------------------------------------------------
+
+fn ws_url() -> String {
+    let loc = web_sys::window().unwrap().location();
+    let proto = if loc.protocol().unwrap_or_default() == "https:" {
+        "wss"
+    } else {
+        "ws"
+    };
+    let host = loc.host().unwrap_or_default();
+    format!("{proto}://{host}/ws")
+}
+
+fn connect_ws() {
+    STATE.with(|s| s.borrow_mut().last_ws_try = now());
+    let ws = match WebSocket::new(&ws_url()) {
+        Ok(w) => w,
+        Err(_) => return,
+    };
+    WS.with(|c| *c.borrow_mut() = Some(ws.clone()));
+
+    let onopen = Closure::<dyn FnMut()>::new(move || {
+        STATE.with(|s| {
+            let mut st = s.borrow_mut();
+            st.ws_open = true;
+            st.fails = 0;
+        });
+        update_dots();
+        send_sub_current();
+        fetch_snapshot();
+    });
+    ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
+    onopen.forget();
+
+    let onmsg = Closure::<dyn FnMut(MessageEvent)>::new(move |e: MessageEvent| {
+        if let Some(t) = e.data().as_string() {
+            handle_msg(&t);
+        }
+    });
+    ws.set_onmessage(Some(onmsg.as_ref().unchecked_ref()));
+    onmsg.forget();
+
+    let onclose = Closure::<dyn FnMut()>::new(move || {
+        STATE.with(|s| {
+            let mut st = s.borrow_mut();
+            st.ws_open = false;
+            st.fails += 1;
+            if st.fails >= 3 {
+                st.poll_mode = true;
+            }
+        });
+        update_dots();
+    });
+    ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
+    onclose.forget();
+
+    let onerr = Closure::<dyn FnMut()>::new(|| {});
+    ws.set_onerror(Some(onerr.as_ref().unchecked_ref()));
+    onerr.forget();
+}
+
+fn send_sub_current() {
+    let coin = STATE.with(|s| s.borrow().coin.clone());
+    if coin.is_empty() {
+        return;
+    }
+    if let Some(ws) = WS.with(|c| c.borrow().clone()) {
+        let _ = ws.send_with_str(&format!("{{\"type\":\"sub\",\"coin\":\"{coin}\"}}"));
+    }
+}
+
+fn handle_msg(txt: &str) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(txt) else {
+        return;
+    };
+    match v["type"].as_str().unwrap_or("") {
+        "hello" => {
+            if let Some(a) = v["assets"].as_array() {
+                apply_assets(serde_json::Value::Array(a.clone()));
+            }
+            if let Some(u) = v["upstream"].as_bool() {
+                set_upstream(u);
+            }
+        }
+        "assets" => apply_assets(v["data"].clone()),
+        "status" => set_upstream(v["upstream"].as_bool().unwrap_or(false)),
+        "trade" => {
+            if let Ok(t) = serde_json::from_value::<LiveTrade>(v["data"].clone()) {
+                on_trade(&t);
+            }
+        }
+        "liq" => {
+            if let Ok(l) = serde_json::from_value::<LiveLiquidation>(v["data"].clone()) {
+                on_liq(&l);
+            }
+        }
+        "candle" => {
+            let coin = v["coin"].as_str().unwrap_or("");
+            if let Ok(c) = serde_json::from_value::<Candle>(v["data"].clone()) {
+                on_candle(coin, &c);
+            }
+        }
+        "traders" => {
+            if let Ok(rows) = serde_json::from_value::<Vec<TraderRow>>(v["data"].clone()) {
+                on_traders(&rows);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn set_upstream(u: bool) {
+    STATE.with(|s| s.borrow_mut().upstream = u);
+    update_dots();
+}
+
+fn update_dots() {
+    let (open, upstream, poll) = STATE.with(|s| {
+        let st = s.borrow();
+        (st.ws_open, st.upstream, st.poll_mode)
+    });
+    let _ = el::<web_sys::Element>("dot-ws")
+        .set_attribute("class", &format!("dot {}", if open { "ok" } else { "bad" }));
+    let _ = el::<web_sys::Element>("dot-upstream")
+        .set_attribute("class", &format!("dot {}", if upstream { "ok" } else { "bad" }));
+    let _ = el::<web_sys::Element>("mode-badge")
+        .set_attribute("style", &format!("display:{}", if poll { "inline-block" } else { "none" }));
+}
+
+fn apply_assets(v: serde_json::Value) {
+    let Ok(assets) = serde_json::from_value::<Vec<AssetInfo>>(v) else {
+        return;
+    };
+    let first_boot = STATE.with(|s| {
+        let mut st = s.borrow_mut();
+        let first = st.coin.is_empty();
+        if first {
+            let pick = assets
+                .iter()
+                .find(|a| a.name == "BTC")
+                .or_else(|| assets.first());
+            if let Some(p) = pick {
+                st.coin = p.name.clone();
+            }
+        }
+        st.assets = assets;
+        first && !st.coin.is_empty()
+    });
+    refresh_coin_select();
+    if first_boot {
+        send_sub_current();
+        fetch_snapshot();
+    }
+    update_header_mark();
+}
+
+fn refresh_coin_select() {
+    let (assets, cur) = STATE.with(|s| {
+        let st = s.borrow();
+        (st.assets.clone(), st.coin.clone())
+    });
+    let sel = el::<web_sys::HtmlSelectElement>("coin-select");
+    let mut html = String::new();
+    for a in assets.iter().take(40) {
+        html.push_str(&format!(
+            "<option value='{}'{}>{} · {}</option>",
+            a.name,
+            if a.name == cur { " selected" } else { "" },
+            a.name,
+            shared::fmt_usd(a.day_ntl_vlm),
+        ));
+    }
+    sel.set_inner_html(&html);
+    if !cur.is_empty() {
+        sel.set_value(&cur);
+    }
+}
+
+fn update_header_mark() {
+    let (coin, last_px, assets) = STATE.with(|s| {
+        let st = s.borrow();
+        (st.coin.clone(), st.last_px, st.assets.clone())
+    });
+    let Some(a) = assets.iter().find(|a| a.name == coin) else {
+        // no asset stats yet (REST degraded): still show the live price
+        if last_px > 0.0 {
+            set_text("mark", &fmt_px(last_px));
+            set_text("chg", "");
+        }
+        return;
+    };
+    let px = if last_px > 0.0 { last_px } else { a.mark };
+    let chg = a.change24h() * 100.0;
+    set_text("mark", &fmt_px(px));
+    let _ = el::<web_sys::Element>("chg")
+        .set_attribute("class", if chg >= 0.0 { "up" } else { "down" });
+    set_text("chg", &format!("{:+.2}%", chg));
+}
+
+// ---------------------------------------------------------------------------
+// live events
+// ---------------------------------------------------------------------------
+
+fn on_trade(t: &LiveTrade) {
+    let is_sel = STATE.with(|s| s.borrow().coin == t.coin);
+    if !is_sel {
+        return;
+    }
+    STATE.with(|s| {
+        let mut st = s.borrow_mut();
+        st.last_px = t.px;
+        st.tape.push_front(t.clone());
+        while st.tape.len() > 80 {
+            st.tape.pop_back();
+        }
+        apply_trade(&mut st, t);
+        st.dirty = true;
+    });
+    let scroll = el::<web_sys::Element>("tape-scroll");
+    if let Ok(_) = scroll.insert_adjacent_html("afterbegin", &ui::tape_row_html(t)) {
+        while scroll.child_element_count() > 60 {
+            let node: &web_sys::Node = scroll.as_ref();
+            if let Some(last) = scroll.last_element_child() {
+                let _ = node.remove_child(last.as_ref());
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+/// Fold a live trade into the current footprint state (window + level cells).
+fn apply_trade(st: &mut AppState, t: &LiveTrade) {
+    if st.bucket <= 0.0 {
+        return;
+    }
+    let w = window_start(t.t, st.interval);
+    let center = ((t.px / st.bucket).floor() + 0.5) * st.bucket;
+    let idx = st.windows.iter().position(|x| x.t == w);
+    match idx {
+        Some(i) => {
+            let win = &mut st.windows[i];
+            win.h = win.h.max(t.px);
+            win.l = if win.l <= 0.0 { t.px } else { win.l.min(t.px) };
+            win.c = t.px;
+            if win.o <= 0.0 {
+                win.o = t.px;
+            }
+            win.prints += 1;
+            if t.side.is_buy() {
+                win.buy += t.usd;
+            } else {
+                win.sell += t.usd;
+            }
+            win.delta = win.buy - win.sell;
+            let buy = t.side.is_buy();
+            if let Some(lv) = win
+                .levels
+                .iter_mut()
+                .find(|l| (l.p - center).abs() < st.bucket * 0.25)
+            {
+                lv.n += 1;
+                if buy {
+                    lv.buy += t.usd;
+                } else {
+                    lv.sell += t.usd;
+                }
+                match t.intent {
+                    shared::Intent::Liquidation | shared::Intent::Deleveraging => lv.liq += t.usd,
+                    shared::Intent::StopLoss => lv.stop += t.usd,
+                    shared::Intent::TakeProfit => lv.tp += t.usd,
+                    shared::Intent::Hedge => lv.hedge += t.usd,
+                    _ => {}
+                }
+            } else {
+                let mut lv = LevelAgg {
+                    p: center,
+                    ..Default::default()
+                };
+                if buy {
+                    lv.buy = t.usd;
+                } else {
+                    lv.sell = t.usd;
+                }
+                lv.n = 1;
+                match t.intent {
+                    shared::Intent::Liquidation | shared::Intent::Deleveraging => lv.liq = t.usd,
+                    shared::Intent::StopLoss => lv.stop = t.usd,
+                    shared::Intent::TakeProfit => lv.tp = t.usd,
+                    shared::Intent::Hedge => lv.hedge = t.usd,
+                    _ => {}
+                }
+                win.levels.push(lv);
+                win.levels
+                    .sort_by(|a, b| a.p.partial_cmp(&b.p).unwrap_or(std::cmp::Ordering::Equal));
+            }
+        }
+        None => {
+            let (buy, sell) = if t.side.is_buy() {
+                (t.usd, 0.0)
+            } else {
+                (0.0, t.usd)
+            };
+            let lv = LevelAgg {
+                p: center,
+                buy,
+                sell,
+                n: 1,
+                liq: if matches!(
+                    t.intent,
+                    shared::Intent::Liquidation | shared::Intent::Deleveraging
+                ) {
+                    t.usd
+                } else {
+                    0.0
+                },
+                stop: if matches!(t.intent, shared::Intent::StopLoss) {
+                    t.usd
+                } else {
+                    0.0
+                },
+                tp: if matches!(t.intent, shared::Intent::TakeProfit) {
+                    t.usd
+                } else {
+                    0.0
+                },
+                hedge: if matches!(t.intent, shared::Intent::Hedge) {
+                    t.usd
+                } else {
+                    0.0
+                },
+            };
+            st.windows.push(FootWindow {
+                t: w,
+                o: t.px,
+                h: t.px,
+                l: t.px,
+                c: t.px,
+                buy,
+                sell,
+                delta: buy - sell,
+                poc: center,
+                wallets: 1,
+                prints: 1,
+                levels: vec![lv],
+                tb: vec![],
+                ts: vec![],
+            });
+            st.candle_gaps.remove(&w);
+            while st.windows.len() > 160 {
+                st.windows.remove(0);
+            }
+        }
+    }
+}
+
+fn on_liq(l: &LiveLiquidation) {
+    STATE.with(|s| {
+        let mut st = s.borrow_mut();
+        st.liqs.push_front(l.clone());
+        while st.liqs.len() > 40 {
+            st.liqs.pop_back();
+        }
+    });
+    let feed = el::<web_sys::Element>("liq-feed");
+    if let Ok(_) = feed.insert_adjacent_html("afterbegin", &ui::liq_row_html(l)) {
+        while feed.child_element_count() > 40 {
+            let node: &web_sys::Node = feed.as_ref();
+            if let Some(last) = feed.last_element_child() {
+                let _ = node.remove_child(last.as_ref());
+            } else {
+                break;
+            }
+        }
+    }
+    set_text("liq-count", &format!("×{}", STATE.with(|s| s.borrow().liqs.len())));
+}
+
+fn on_candle(coin: &str, c: &Candle) {
+    let is_sel = STATE.with(|s| s.borrow().coin == coin);
+    if !is_sel {
+        return;
+    }
+    STATE.with(|s| {
+        let mut st = s.borrow_mut();
+        let w = window_start(c.t, st.interval);
+        match st.windows.iter_mut().find(|x| x.t == w) {
+            Some(win) => {
+                if win.prints == 0 {
+                    win.o = c.o;
+                    win.h = c.h;
+                    win.l = c.l;
+                    win.c = c.c;
+                } else {
+                    win.h = win.h.max(c.h);
+                    win.l = win.l.min(c.l);
+                    win.c = c.c;
+                }
+            }
+            None => {
+                st.candle_gaps
+                    .entry(w)
+                    .and_modify(|old| {
+                        old.o = c.o;
+                        old.c = c.c;
+                        old.h = c.h;
+                        old.l = c.l;
+                    })
+                    .or_insert_with(|| c.clone());
+            }
+        }
+        st.dirty = true;
+    });
+}
+
+fn on_traders(rows: &[TraderRow]) {
+    STATE.with(|s| s.borrow_mut().traders = rows.to_vec());
+    el::<web_sys::Element>("traders-scroll").set_inner_html(&ui::traders_html(rows));
+}
+
+// ---------------------------------------------------------------------------
+// snapshot
+// ---------------------------------------------------------------------------
+
+fn fetch_snapshot() {
+    let (coin, interval) = STATE.with(|s| {
+        let st = s.borrow();
+        (st.coin.clone(), st.interval)
+    });
+    if coin.is_empty() {
+        return;
+    }
+    fetch_json(
+        format!("/api/footprint?coin={coin}&interval={interval}&limit=120&bucket_mult=1"),
+        move |v| {
+            let Ok(snap) = serde_json::from_value::<FootprintSnapshot>(v) else {
+                return;
+            };
+            STATE.with(|s| {
+                let mut st = s.borrow_mut();
+                st.windows = snap.windows.clone();
+                st.bucket = snap.bucket;
+                st.tick = snap.tick;
+                st.last_px = st
+                    .windows
+                    .last()
+                    .map(|w| w.c)
+                    .filter(|c| *c > 0.0)
+                    .unwrap_or(st.last_px);
+                st.candle_gaps.clear();
+                let iv = st.interval;
+                for c in &snap.candles {
+                    st.candle_gaps.insert(window_start(c.t, iv), c.clone());
+                }
+                let wts: Vec<i64> = st.windows.iter().map(|w| w.t).collect();
+                for t in wts {
+                    st.candle_gaps.remove(&t);
+                }
+                st.dirty = true;
+            });
+        },
+    );
+}
+
+fn fetch_assets() {
+    fetch_json("/api/assets".into(), move |v| {
+        if let Some(a) = v["assets"].as_array() {
+            apply_assets(serde_json::Value::Array(a.clone()));
+        }
+        if let Some(u) = v["upstream"].as_bool() {
+            set_upstream(u);
+        }
+    });
+}
+
+fn fetch_traders_rest() {
+    let coin = STATE.with(|s| s.borrow().coin.clone());
+    if coin.is_empty() {
+        return;
+    }
+    fetch_json(
+        format!("/api/traders?coin={coin}&minutes=60"),
+        move |v| {
+            if let Ok(rows) = serde_json::from_value::<Vec<TraderRow>>(v["data"].clone()) {
+                on_traders(&rows);
+            }
+        },
+    );
+}
+
+// ---------------------------------------------------------------------------
+// flow / header ticks
+// ---------------------------------------------------------------------------
+
+fn flow_tick() {
+    let sums = STATE.with(|s| ui::flow_sums(&s.borrow().windows));
+    let delta = sums.buy - sums.sell;
+    let total = sums.buy + sums.sell;
+    let d = el::<web_sys::Element>("flow-delta");
+    d.set_text_content(Some(&shared::fmt_usd(delta)));
+    let _ = d.set_attribute("class", if delta >= 0.0 { "up" } else { "down" });
+    let bb = if total > 0.0 { sums.buy / total * 100.0 } else { 50.0 };
+    el::<web_sys::Element>("flow-bar-b")
+        .set_attribute("style", &format!("width:{bb:.1}%"))
+        .ok();
+    el::<web_sys::Element>("flow-bar-s")
+        .set_attribute("style", &format!("width:{:.1}%", 100.0 - bb))
+        .ok();
+    set_text(
+        "flow-buy",
+        &format!("BUY {} ({:.0}%)", shared::fmt_usd(sums.buy), bb),
+    );
+    set_text(
+        "flow-sell",
+        &format!("SELL {} ({:.0}%)", shared::fmt_usd(sums.sell), 100.0 - bb),
+    );
+    set_text(
+        "f-liq",
+        &shared::fmt_usd(sums.liq),
+    );
+    set_text("f-stop", &shared::fmt_usd(sums.stop));
+    set_text("f-tp", &shared::fmt_usd(sums.tp));
+    set_text("f-hedge", &shared::fmt_usd(sums.hedge));
+    set_text(
+        "f-prints",
+        &format!("{} prints · {} wallets", sums.prints, sums.wallets),
+    );
+    set_text(
+        "flow-note",
+        &format!("net taker delta · ~{}m span", sums.span_min),
+    );
+    update_header_mark();
+}
+
+// ---------------------------------------------------------------------------
+// canvas events
+// ---------------------------------------------------------------------------
+
+fn canvas_pos(e: &web_sys::MouseEvent) -> Option<(f64, f64)> {
+    let canvas = el::<web_sys::HtmlCanvasElement>("chart");
+    let r = canvas.get_bounding_client_rect();
+    Some((e.client_x() as f64 - r.left(), e.client_y() as f64 - r.top()))
+}
+
+fn update_tooltip(x: f64, y: f64) {
+    let now_t = now();
+    let allow = STATE.with(|s| {
+        let mut st = s.borrow_mut();
+        st.mouse = Some((x, y));
+        let ok = now_t - st.last_tt > 60.0;
+        if ok {
+            st.last_tt = now_t;
+        }
+        ok
+    });
+    if !allow {
+        return;
+    }
+    let Some(hit) = canvas::hit_test(x, y) else {
+        let tt = el::<web_sys::HtmlElement>("tooltip");
+        tt.style().set_property("display", "none").ok();
+        return;
+    };
+    let html = STATE.with(|s| {
+        let st = s.borrow();
+        let win = st.windows.iter().find(|w| w.t == hit.t);
+        let level = win.and_then(|w| {
+            hit.level.and_then(|p| {
+                w.levels
+                    .iter()
+                    .find(|l| (l.p - p).abs() < st.bucket.max(1e-9) * 0.25)
+            })
+        });
+        let gap = st.candle_gaps.get(&hit.t);
+        match (win, level) {
+            (Some(w), l) => Some(ui::tooltip_html(&st.coin, w, l, st.bucket)),
+            (None, Some(_)) => None,
+            (None, None) => gap.map(|c| {
+                format!(
+                    "<div class='tt-h'>{} · {}</div>\
+                     <div class='row'><span>o / c</span><b>{} / {}</b></div>\
+                     <div class='row'><span>h / l</span><b>{} / {}</b></div>\
+                     <div class='row'><span>no taker flow</span><b>—</b></div>",
+                    st.coin,
+                    ui::ms_hm(hit.t),
+                    fmt_px(c.o),
+                    fmt_px(c.c),
+                    fmt_px(c.h),
+                    fmt_px(c.l),
+                )
+            }),
+        }
+    });
+    let tt = el::<web_sys::HtmlElement>("tooltip");
+    match html {
+        Some(h) => {
+            tt.set_inner_html(&h);
+            tt.style().set_property("display", "block").ok();
+            let wrap = el::<web_sys::Element>("chart-wrap");
+            let (ww, _wh) = (wrap.client_width() as f64, wrap.client_height() as f64);
+            let (mut tx, ty) = (x + 16.0, y + 14.0);
+            if tx + 240.0 > ww {
+                tx = (x - 250.0).max(4.0);
+            }
+            tt.style()
+                .set_property("left", &format!("{tx:.0}px"))
+                .ok();
+            tt.style()
+                .set_property("top", &format!("{ty:.0}px"))
+                .ok();
+        }
+        None => {
+            tt.style().set_property("display", "none").ok();
+        }
+    }
+}
+
+fn on_canvas_click(x: f64, y: f64) {
+    let Some(hit) = canvas::hit_test(x, y) else { return };
+    let (coin, interval, bucket) = STATE.with(|s| {
+        let st = s.borrow();
+        (st.coin.clone(), st.interval, st.bucket)
+    });
+    if coin.is_empty() || bucket <= 0.0 {
+        return;
+    }
+    // clicked a specific level cell -> that level; otherwise the window's POC
+    let level_p = match hit.level {
+        Some(p) => p,
+        None => {
+            let poc = STATE.with(|s| {
+                let st = s.borrow();
+                st.windows
+                    .iter()
+                    .find(|w| w.t == hit.t)
+                    .map(|w| {
+                        if w.poc > 0.0 {
+                            w.poc
+                        } else {
+                            w.levels
+                                .iter()
+                                .max_by(|a, b| {
+                                    a.total()
+                                        .partial_cmp(&b.total())
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                })
+                                .map(|l| l.p)
+                                .unwrap_or(0.0)
+                        }
+                    })
+                    .unwrap_or(0.0)
+            });
+            if poc <= 0.0 {
+                return;
+            }
+            poc
+        }
+    };
+    let p_lo = level_p - bucket / 2.0;
+    fetch_json(
+        format!(
+            "/api/level?coin={coin}&t={}&interval={interval}&p_lo={p_lo:.10}&bucket_mult=1",
+            hit.t
+        ),
+        move |v| {
+            let Ok(d) = serde_json::from_value::<LevelDetail>(v) else {
+                return;
+            };
+            el::<web_sys::Element>("modal-body").set_inner_html(&ui::level_modal_html(&d));
+            let _ = el::<web_sys::Element>("modal").set_attribute("class", "open");
+        },
+    );
+}
+
+fn close_modal() {
+    let _ = el::<web_sys::Element>("modal").set_attribute("class", "");
+}
+
+// ---------------------------------------------------------------------------
+// boot
+// ---------------------------------------------------------------------------
+
+#[wasm_bindgen(start)]
+pub fn start() {
+    console_error_panic_hook::set_once();
+
+    // canvas + events
+    let canvas = el::<web_sys::HtmlCanvasElement>("chart");
+    {
+        let c2 = canvas.clone();
+        let mv = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |e| {
+            if let Some((x, y)) = canvas_pos(&e) {
+                update_tooltip(x, y);
+                STATE.with(|s| s.borrow_mut().dirty = true);
+            }
+        });
+        c2.set_onmousemove(Some(mv.as_ref().unchecked_ref()));
+        mv.forget();
+    }
+    {
+        let c2 = canvas.clone();
+        let lv = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            STATE.with(|s| s.borrow_mut().mouse = None);
+            el::<web_sys::HtmlElement>("tooltip")
+                .style()
+                .set_property("display", "none")
+                .ok();
+        });
+        c2.set_onmouseleave(Some(lv.as_ref().unchecked_ref()));
+        lv.forget();
+    }
+    {
+        let c2 = canvas.clone();
+        let cl = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |e| {
+            if let Some((x, y)) = canvas_pos(&e) {
+                on_canvas_click(x, y);
+            }
+        });
+        c2.set_onclick(Some(cl.as_ref().unchecked_ref()));
+        cl.forget();
+    }
+    CANVAS.with(|c| *c.borrow_mut() = Some(canvas));
+
+    // coin select
+    {
+        let sel = el::<web_sys::HtmlSelectElement>("coin-select");
+        let onch = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
+            let target = e.target().unwrap();
+            let sel: web_sys::HtmlSelectElement = target.dyn_into().unwrap();
+            let coin = sel.value();
+            if coin.is_empty() {
+                return;
+            }
+            STATE.with(|s| {
+                let mut st = s.borrow_mut();
+                if st.coin == coin {
+                    return;
+                }
+                st.coin = coin;
+                st.windows.clear();
+                st.candle_gaps.clear();
+                st.tape.clear();
+                st.traders.clear();
+                st.last_px = 0.0;
+                st.dirty = true;
+            });
+            el::<web_sys::Element>("tape-scroll").set_inner_html("");
+            el::<web_sys::Element>("traders-scroll").set_inner_html("");
+            send_sub_current();
+            fetch_snapshot();
+            update_header_mark();
+        });
+        sel.set_onchange(Some(onch.as_ref().unchecked_ref()));
+        onch.forget();
+    }
+
+    // interval buttons
+    {
+        let coll = doc().get_elements_by_class_name("iv-btn");
+        for i in 0..coll.length() {
+            if let Some(b) = coll.item(i) {
+                let iv = b
+                    .get_attribute("data-iv")
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .unwrap_or(60_000);
+                let oncl = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
+                    let target = e.target().unwrap();
+                    let b: web_sys::HtmlElement = target.dyn_into().unwrap();
+                    let my_iv = b.get_attribute("data-iv");
+                    // toggle active class on all buttons
+                    let coll2 = doc().get_elements_by_class_name("iv-btn");
+                    for j in 0..coll2.length() {
+                        if let Some(x) = coll2.item(j) {
+                            let is_me = x.get_attribute("data-iv") == my_iv;
+                            let cur = x.get_attribute("class").unwrap_or_default();
+                            let base = cur.replace(" active", "");
+                            x.set_attribute(
+                                "class",
+                                &format!("{base}{}", if is_me { " active" } else { "" }),
+                            )
+                            .ok();
+                        }
+                    }
+                    STATE.with(|s| {
+                        let mut st = s.borrow_mut();
+                        if st.interval != iv {
+                            st.interval = iv;
+                            st.dirty = true;
+                        }
+                    });
+                    fetch_snapshot();
+                });
+                b.add_event_listener_with_callback("click", oncl.as_ref().unchecked_ref())
+                    .unwrap();
+                oncl.forget();
+            }
+        }
+    }
+
+    // modal close (delegation) + ESC
+    {
+        let onc = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
+            if let Some(t) = e.target() {
+                if let Ok(x) = t.dyn_into::<web_sys::Element>() {
+                    let cls = x.get_attribute("class").unwrap_or_default();
+                    if x.id() == "modal" || cls.contains("m-close") {
+                        close_modal();
+                    }
+                }
+            }
+        });
+        let md = el::<web_sys::Element>("modal");
+        md.add_event_listener_with_callback("click", onc.as_ref().unchecked_ref())
+            .unwrap();
+        onc.forget();
+    }
+    {
+        let kd = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
+            if e.key() == "Escape" {
+                close_modal();
+            }
+        });
+        doc().set_onkeydown(Some(kd.as_ref().unchecked_ref()));
+        kd.forget();
+    }
+
+    // periodic ticks
+    every(1000, || {
+        set_text("clock", &ui::ms_hms(now() as i64));
+    });
+    every(500, flow_tick);
+    every(20_000, || {
+        if let Some(ws) = WS.with(|c| c.borrow().clone()) {
+            let _ = ws.send_with_str("{\"type\":\"ping\"}");
+        }
+    });
+    every(2000, || {
+        // ws watchdog: reconnect when down; degrade to polling after failures
+        let (open, tries, poll) = STATE.with(|s| {
+            let st = s.borrow();
+            (st.ws_open, st.last_ws_try, st.poll_mode)
+        });
+        let wait = if poll { 10_000.0 } else { 2_500.0 };
+        if !open && now() - tries > wait {
+            connect_ws();
+        }
+    });
+    every(1500, || {
+        let poll = STATE.with(|s| s.borrow().poll_mode);
+        if poll {
+            fetch_snapshot();
+            fetch_traders_rest();
+        }
+    });
+    every(30_000, || {
+        let (open, poll) = STATE.with(|s| {
+            let st = s.borrow();
+            (st.ws_open, st.poll_mode)
+        });
+        if open && !poll {
+            fetch_snapshot(); // resync retro-tagged intents
+        }
+    });
+
+    // render loop
+    start_render_loop();
+    update_dots();
+    connect_ws();
+    fetch_assets();
+}
+
+fn start_render_loop() {
+    RAF.with(|r| {
+        let cb = Closure::<dyn FnMut()>::new(|| {
+            if let Some(canvas) = CANVAS.with(|c| c.borrow().clone()) {
+                STATE.with(|s| {
+                    let mut st = s.borrow_mut();
+                    if st.dirty || now() - st.last_draw > 250.0 {
+                        canvas::draw(&st, &canvas);
+                        st.dirty = false;
+                        st.last_draw = now();
+                    }
+                });
+            }
+            let f = RAF.with(|r| {
+                r.borrow()
+                    .as_ref()
+                    .map(|c| c.as_ref().unchecked_ref::<js_sys::Function>().clone())
+            });
+            if let Some(f) = f {
+                let _ = web_sys::window().unwrap().request_animation_frame(&f);
+            }
+        });
+        *r.borrow_mut() = Some(cb);
+    });
+    let f = RAF.with(|r| {
+        r.borrow()
+            .as_ref()
+            .map(|c| c.as_ref().unchecked_ref::<js_sys::Function>().clone())
+    });
+    if let Some(f) = f {
+        let _ = web_sys::window().unwrap().request_animation_frame(&f);
+    }
+}

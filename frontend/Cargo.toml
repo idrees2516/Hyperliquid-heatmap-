@@ -1,0 +1,43 @@
+[package]
+name = "frontend"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+shared = { path = "../shared" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+gloo-timers = "0.3"
+console_error_panic_hook = "0.1"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "Element",
+    "Node",
+    "HtmlElement",
+    "HtmlCollection",
+    "HtmlCanvasElement",
+    "HtmlSelectElement",
+    "CanvasRenderingContext2d",
+    "TextMetrics",
+    "WebSocket",
+    "MessageEvent",
+    "Event",
+    "CloseEvent",
+    "ErrorEvent",
+    "MouseEvent",
+    "KeyboardEvent",
+    "DomTokenList",
+    "DomRect",
+    "CssStyleDeclaration",
+    "Location",
+    "Response",
+    "Request",
+    "RequestInit",
+    "Headers",
+] }
