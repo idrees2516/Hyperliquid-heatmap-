@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use shared::{
     window_start, AssetInfo, Candle, FootWindow, FootprintSnapshot, LevelAgg, LevelDetail,
-    LiveLiquidation, LiveTrade, TraderRow,
+    LiveLiquidation, LiveTrade, Opportunity, RadarSnapshot, TraderRow, TuningParams,
 };
 use wasm_bindgen::{closure::Closure, prelude::wasm_bindgen, JsCast, JsValue};
 use web_sys::{MessageEvent, WebSocket};
@@ -36,6 +36,16 @@ pub struct AppState {
     pub tape: VecDeque<LiveTrade>,
     pub traders: Vec<TraderRow>,
     pub liqs: VecDeque<LiveLiquidation>,
+    /// liquidation radar snapshot for the selected coin
+    pub radar: Option<RadarSnapshot>,
+    /// live opportunity feed (all markets)
+    pub opps: Vec<Opportunity>,
+    /// current engine tuning params
+    pub tuning: Option<TuningParams>,
+    /// active sidebar view: live | radar | opps | tune
+    pub side_view: String,
+    /// suppress tuning re-render while the user is dragging a slider
+    pub tuning_interacting: bool,
     pub last_px: f64,
     pub dirty: bool,
     pub mouse: Option<(f64, f64)>,
@@ -61,6 +71,11 @@ impl Default for AppState {
             tape: VecDeque::new(),
             traders: Vec::new(),
             liqs: VecDeque::new(),
+            radar: None,
+            opps: Vec::new(),
+            tuning: None,
+            side_view: "live".into(),
+            tuning_interacting: false,
             last_px: 0.0,
             dirty: true,
             mouse: None,
@@ -115,6 +130,39 @@ fn every(ms: u32, f: impl Fn() + 'static) {
 fn fetch_json(url: String, cb: impl Fn(serde_json::Value) + 'static) {
     let w = web_sys::window().unwrap();
     let p = w.fetch_with_str(&url);
+    let cb = std::rc::Rc::new(cb);
+    let on_resp = Closure::<dyn FnMut(JsValue)>::new(move |resp: JsValue| {
+        let r: web_sys::Response = resp.unchecked_into();
+        let p2 = match r.text() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let cb2 = cb.clone();
+        let on_text = Closure::<dyn FnMut(JsValue)>::new(move |txt: JsValue| {
+            if let Some(s) = txt.as_string() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                    cb2(v);
+                }
+            }
+        });
+        let _ = p2.then(&on_text);
+        on_text.forget();
+    });
+    let _ = p.then(&on_resp);
+    on_resp.forget();
+}
+
+/// POST a JSON body and hand the parsed response to `cb`.
+fn post_json(url: String, body: String, cb: impl Fn(serde_json::Value) + 'static) {
+    let w = web_sys::window().unwrap();
+    let init = web_sys::RequestInit::new();
+    init.set_method("POST");
+    init.set_body(&JsValue::from_str(&body));
+    if let Ok(h) = web_sys::Headers::new() {
+        let _ = h.set("Content-Type", "application/json");
+        init.set_headers(&h.into());
+    }
+    let p = w.fetch_with_str_and_init(&url, &init);
     let cb = std::rc::Rc::new(cb);
     let on_resp = Closure::<dyn FnMut(JsValue)>::new(move |resp: JsValue| {
         let r: web_sys::Response = resp.unchecked_into();
@@ -246,6 +294,21 @@ fn handle_msg(txt: &str) {
                 on_traders(&rows);
             }
         }
+        "radar" => {
+            if let Ok(snap) = serde_json::from_value::<RadarSnapshot>(v["data"].clone()) {
+                on_radar(snap);
+            }
+        }
+        "opps" => {
+            if let Ok(rows) = serde_json::from_value::<Vec<Opportunity>>(v["data"].clone()) {
+                on_opps(rows);
+            }
+        }
+        "tuning" => {
+            if let Ok(p) = serde_json::from_value::<TuningParams>(v["data"].clone()) {
+                on_tuning(p);
+            }
+        }
         _ => {}
     }
 }
@@ -302,7 +365,7 @@ fn refresh_coin_select() {
     });
     let sel = el::<web_sys::HtmlSelectElement>("coin-select");
     let mut html = String::new();
-    for a in assets.iter().take(40) {
+    for a in assets.iter().take(60) {
         html.push_str(&format!(
             "<option value='{}'{}>{} · {}</option>",
             a.name,
@@ -560,8 +623,227 @@ fn on_traders(rows: &[TraderRow]) {
 }
 
 // ---------------------------------------------------------------------------
+// radar / opps / tuning (live panels)
+// ---------------------------------------------------------------------------
+
+fn on_radar(snap: RadarSnapshot) {
+    let (view, is_sel) = STATE.with(|s| {
+        let mut st = s.borrow_mut();
+        let sel = st.coin == snap.coin;
+        if sel {
+            st.radar = Some(snap.clone());
+        }
+        (st.side_view.clone(), sel)
+    });
+    if !is_sel {
+        return;
+    }
+    let snap_ref = STATE.with(|s| s.borrow().radar.clone());
+    let Some(snap) = snap_ref else { return };
+    el::<web_sys::Element>("radar-head").set_inner_html(&ui::radar_head_html(&snap));
+    el::<web_sys::Element>("radar-levels").set_inner_html(&ui::radar_levels_html(&snap));
+    el::<web_sys::Element>("cascade-feed").set_inner_html(&ui::cascade_feed_html(&snap.last_cascade));
+    set_text(
+        "cascade-count",
+        &format!("×{}", snap.last_cascade.len().min(99)),
+    );
+    // radar tab badge: armed levels near price
+    let near = snap
+        .levels
+        .iter()
+        .filter(|l| {
+            l.state == shared::LevelState::Armed
+                && snap.px > 0.0
+                && ((l.px - snap.px) / snap.px).abs() <= 0.05
+        })
+        .count();
+    let badge = if near > 0 { near.to_string() } else { String::new() };
+    set_text("radar-badge", &badge);
+    let _ = view;
+}
+
+fn on_opps(rows: Vec<Opportunity>) {
+    // drop expired rows (TTL)
+    let now = now() as i64;
+    let live: Vec<Opportunity> = rows
+        .into_iter()
+        .filter(|o| now - o.t <= o.ttl_ms)
+        .collect();
+    let n = live.len();
+    STATE.with(|s| s.borrow_mut().opps = live.clone());
+    el::<web_sys::Element>("opps-scroll").set_inner_html(&ui::opps_html(&live));
+    let badge = if n > 0 { n.to_string() } else { String::new() };
+    set_text("opps-badge", &badge);
+    set_text(
+        "opps-note",
+        &format!("{} live setups · all markets", n),
+    );
+}
+
+fn on_tuning(p: TuningParams) {
+    let interacting = STATE.with(|s| {
+        let mut st = s.borrow_mut();
+        let was = st.tuning_interacting;
+        st.tuning = Some(p.clone());
+        !was
+    });
+    if !interacting {
+        return; // user is mid-drag; values re-render on release
+    }
+    render_tuning(&p);
+}
+
+fn render_tuning(p: &TuningParams) {
+    el::<web_sys::Element>("tune-scroll").set_inner_html(&ui::tuning_html(p));
+    wire_tuning_controls();
+}
+
+fn on_tuning_saved(v: serde_json::Value) {
+    if let Ok(p) = serde_json::from_value::<TuningParams>(v) {
+        render_tuning(&p);
+        STATE.with(|s| {
+            let mut st = s.borrow_mut();
+            st.tuning = Some(p);
+        });
+    }
+}
+
+fn fetch_radar() {
+    let coin = STATE.with(|s| s.borrow().coin.clone());
+    if coin.is_empty() {
+        return;
+    }
+    fetch_json(format!("/api/radar?coin={coin}"), move |v| {
+        if let Ok(snap) = serde_json::from_value::<RadarSnapshot>(v) {
+            on_radar(snap);
+        }
+    });
+}
+
+fn fetch_opps() {
+    fetch_json("/api/opps".into(), move |v| {
+        if let Ok(rows) = serde_json::from_value::<Vec<Opportunity>>(v["opps"].clone()) {
+            on_opps(rows);
+        }
+    });
+}
+
+fn fetch_tuning() {
+    fetch_json("/api/tuning".into(), move |v| {
+        if let Ok(p) = serde_json::from_value::<TuningParams>(v) {
+            on_tuning(p);
+        }
+    });
+}
+
+/// POST one tuned field to the engine (live update).
+fn post_tuning_field(key: &str, value: f64) {
+    let body = format!("{{\"{key}\":{value}}}");
+    post_json("/api/tuning".into(), body, on_tuning_saved);
+}
+
+fn post_tuning_reset() {
+    post_json("/api/tuning/reset".into(), "{}".into(), on_tuning_saved);
+}
+
+// ---------------------------------------------------------------------------
 // snapshot
 // ---------------------------------------------------------------------------
+
+fn update_tuning_label(key: &str, v: f64) {
+    set_text(&format!("tn-d-{key}"), &ui::ctrl_display(key, v));
+}
+
+/// Attach change listeners to the rendered tuning controls.
+fn wire_tuning_controls() {
+    let coll = doc().get_elements_by_class_name("tn-range");
+    for i in 0..coll.length() {
+        let Some(node) = coll.item(i) else { continue };
+        let Ok(inp) = node.dyn_into::<web_sys::HtmlInputElement>() else { continue };
+        let key = inp.get_attribute("data-key").unwrap_or_default();
+        // live label update while dragging
+        let k2 = key.clone();
+        let on_input = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
+            let Ok(t) = e
+                .target()
+                .unwrap()
+                .dyn_into::<web_sys::HtmlInputElement>()
+            else {
+                return;
+            };
+            let v: f64 = t.value().parse().unwrap_or(0.0);
+            update_tuning_label(&k2, v);
+            STATE.with(|s| s.borrow_mut().tuning_interacting = true);
+        });
+        inp.add_event_listener_with_callback("input", on_input.as_ref().unchecked_ref())
+            .unwrap();
+        on_input.forget();
+        // release: POST the new value to the engine
+        let k3 = key.clone();
+        let on_change = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
+            let Ok(t) = e
+                .target()
+                .unwrap()
+                .dyn_into::<web_sys::HtmlInputElement>()
+            else {
+                return;
+            };
+            let v: f64 = t.value().parse().unwrap_or(0.0);
+            post_tuning_field(&k3, v);
+            STATE.with(|s| s.borrow_mut().tuning_interacting = false);
+        });
+        inp.add_event_listener_with_callback("change", on_change.as_ref().unchecked_ref())
+            .unwrap();
+        on_change.forget();
+    }
+    if let Some(b) = doc().get_element_by_id("tn-reset") {
+        let onc = Closure::<dyn FnMut(web_sys::Event)>::new(|_| post_tuning_reset());
+        b.add_event_listener_with_callback("click", onc.as_ref().unchecked_ref())
+            .unwrap();
+        onc.forget();
+    }
+    if let Some(b) = doc().get_element_by_id("tn-refresh") {
+        let onc = Closure::<dyn FnMut(web_sys::Event)>::new(|_| fetch_tuning());
+        b.add_event_listener_with_callback("click", onc.as_ref().unchecked_ref())
+            .unwrap();
+        onc.forget();
+    }
+}
+
+/// Switch the sidebar between LIVE / RADAR / OPPS / TUNE.
+fn switch_side_view(view: &str) {
+    let tabs = doc().get_elements_by_class_name("side-tab");
+    for i in 0..tabs.length() {
+        if let Some(b) = tabs.item(i) {
+            let is = b
+                .get_attribute("data-view")
+                .map(|v| v == view)
+                .unwrap_or(false);
+            let _ = b.set_attribute(
+                "class",
+                if is { "side-tab active" } else { "side-tab" },
+            );
+        }
+    }
+    let views = doc().get_elements_by_class_name("side-view");
+    for i in 0..views.length() {
+        if let Some(v) = views.item(i) {
+            let is = v.id() == format!("view-{view}");
+            let _ = v.set_attribute(
+                "class",
+                if is { "side-view active" } else { "side-view" },
+            );
+        }
+    }
+    STATE.with(|s| s.borrow_mut().side_view = view.to_string());
+    if view == "radar" {
+        fetch_radar();
+    }
+    let need_tuning = STATE.with(|s| s.borrow().tuning.is_none());
+    if view == "tune" && need_tuning {
+        fetch_tuning();
+    }
+}
 
 fn fetch_snapshot() {
     let (coin, interval) = STATE.with(|s| {
@@ -882,13 +1164,17 @@ pub fn start() {
                 st.candle_gaps.clear();
                 st.tape.clear();
                 st.traders.clear();
+                st.radar = None;
                 st.last_px = 0.0;
                 st.dirty = true;
             });
             el::<web_sys::Element>("tape-scroll").set_inner_html("");
             el::<web_sys::Element>("traders-scroll").set_inner_html("");
+            el::<web_sys::Element>("radar-levels").set_inner_html("");
+            el::<web_sys::Element>("cascade-feed").set_inner_html("");
             send_sub_current();
             fetch_snapshot();
+            fetch_radar();
             update_header_mark();
         });
         sel.set_onchange(Some(onch.as_ref().unchecked_ref()));
@@ -965,6 +1251,22 @@ pub fn start() {
         kd.forget();
     }
 
+    // sidebar tabs: LIVE / RADAR / OPPS / TUNE
+    {
+        let coll = doc().get_elements_by_class_name("side-tab");
+        for i in 0..coll.length() {
+            if let Some(b) = coll.item(i) {
+                let view = b.get_attribute("data-view").unwrap_or_default();
+                let onc = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+                    switch_side_view(&view);
+                });
+                b.add_event_listener_with_callback("click", onc.as_ref().unchecked_ref())
+                    .unwrap();
+                onc.forget();
+            }
+        }
+    }
+
     // periodic ticks
     every(1000, || {
         set_text("clock", &ui::ms_hms(now() as i64));
@@ -991,7 +1293,19 @@ pub fn start() {
         if poll {
             fetch_snapshot();
             fetch_traders_rest();
+            fetch_radar();
         }
+    });
+    every(10_000, || {
+        // radar REST backup (WS pushes every 3s for the selected coin)
+        let view = STATE.with(|s| s.borrow().side_view.clone());
+        if view == "radar" {
+            fetch_radar();
+        }
+    });
+    every(15_000, || {
+        // opportunities REST backup (WS pushes every 5s)
+        fetch_opps();
     });
     every(30_000, || {
         let (open, poll) = STATE.with(|s| {
@@ -1008,6 +1322,8 @@ pub fn start() {
     update_dots();
     connect_ws();
     fetch_assets();
+    fetch_tuning();
+    fetch_opps();
 }
 
 fn start_render_loop() {

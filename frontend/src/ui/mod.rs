@@ -1,9 +1,11 @@
 //! Imperative DOM panel rendering: tape rows, liquidation feed, trader
-//! leaderboard, flow stats and the level drill-down modal.
+//! leaderboard, flow stats, the level drill-down modal, the radar panel,
+//! the opportunities feed and the tuning controls.
 //! All helpers return HTML strings; the app injects them via innerHTML.
 
 use shared::{
-    fmt_qty, fmt_usd, short_addr, FootWindow, LevelDetail, LiveLiquidation, LiveTrade, TraderRow,
+    fmt_qty, fmt_usd, short_addr, CascadeRecord, FootWindow, LevelDetail, LiveLiquidation,
+    LiveTrade, Opportunity, RadarLevel, RadarSnapshot, TraderRow, TuningParams,
 };
 
 // ---------------------------------------------------------------------------
@@ -397,4 +399,343 @@ pub fn tooltip_html(
         w.prints, w.wallets
     ));
     s
+}
+
+// ---------------------------------------------------------------------------
+// radar panel
+// ---------------------------------------------------------------------------
+
+fn lvl_state_cls(s: shared::LevelState) -> &'static str {
+    match s {
+        shared::LevelState::Armed => "armed",
+        shared::LevelState::Engaged => "engaged",
+        shared::LevelState::Swept => "swept",
+    }
+}
+
+fn lvl_dist_pct(lv: &RadarLevel, px: f64) -> f64 {
+    if px > 0.0 {
+        (lv.px - px) / px * 100.0
+    } else {
+        0.0
+    }
+}
+
+pub fn radar_head_html(snap: &RadarSnapshot) -> String {
+    let oh = &snap.overhang;
+    format!(
+        "<div class='big'>{} {}</div>\
+         <div class='sub'><span class='pill' style='color:#f0435c'>longs ↓ {}</span>\
+         <span class='pill' style='color:#1fc77e'>shorts ↑ {}</span>within 5%</div>\
+         <div class='sub'>nearest long-liq {} · nearest short-liq {}</div>",
+        snap.coin,
+        fmt_px(snap.px),
+        fmt_usd(oh.long_usd_5),
+        fmt_usd(oh.short_usd_5),
+        oh.long_nearest_px
+            .map(|p| format!("{} ({})", fmt_px(p), fmt_usd(oh.long_nearest_usd)))
+            .unwrap_or_else(|| "—".into()),
+        oh.short_nearest_px
+            .map(|p| format!("{} ({})", fmt_px(p), fmt_usd(oh.short_nearest_usd)))
+            .unwrap_or_else(|| "—".into()),
+    )
+}
+
+pub fn radar_levels_html(snap: &RadarSnapshot) -> String {
+    let px = snap.px;
+    let max_est = snap
+        .levels
+        .iter()
+        .map(|l| l.est_usd.max(l.swept_usd))
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
+    let mut rows = String::new();
+    for lv in snap.levels.iter().take(60) {
+        let dist = lvl_dist_pct(lv, px);
+        let side = if lv.long { "L·↓" } else { "S·↑" };
+        let amt_cls = if lv.long { "long" } else { "short" };
+        let bar_w = ((lv.est_usd.max(lv.swept_usd) / max_est) * 100.0).clamp(2.0, 100.0);
+        rows.push_str(&format!(
+            "<div class='rl-row'><span>{side} {}</span><span class='st {}'>{}</span>\
+             <span class='amt {amt_cls}'>{}</span><span class='px'>{}</span>\
+             <span class='dist'>{:+.2}%</span>\
+             <div class='bar'><div class='fill' style='width:{bar_w:.0}%'></div></div></div>",
+            fmt_k(lv.peak_usd),
+            lvl_state_cls(lv.state),
+            lv.state.label(),
+            fmt_usd(if lv.state == shared::LevelState::Swept { lv.swept_usd } else { lv.est_usd }),
+            fmt_px(lv.px),
+            dist,
+        ));
+    }
+    if rows.is_empty() {
+        "<div class='warm' style='position:static;padding:26px 0'>arming magnet levels…<br>\
+         <span style='font-size:9.5px'>levels populate as aggressive flow opens positions — \
+         watch it fill during a volatile window</span></div>"
+            .into()
+    } else {
+        rows
+    }
+}
+
+pub fn cascade_row_html(c: &CascadeRecord) -> String {
+    let dir_cls = if c.long { "long" } else { "short" };
+    let dir_txt = if c.long { "LONG" } else { "SHRT" };
+    let move_pct = if c.px_lo > 0.0 {
+        (c.px_hi - c.px_lo) / c.px_lo * 100.0
+    } else {
+        0.0
+    };
+    format!(
+        "<div class='cas-row{}'><span class='t'>{}</span><span class='c'>{}</span>\
+         <span class='dir {}' title='{}s liquidated'>{}</span><span class='usd'>{}</span>\
+         <span class='move'>{:.2}%</span><span class='slip'>{:.0}bp</span></div>",
+        if c.live { " live" } else { "" },
+        ms_hm(c.t_end),
+        c.coin,
+        dir_cls,
+        if c.long { "longs" } else { "shorts" },
+        dir_txt,
+        fmt_usd(c.usd),
+        move_pct,
+        c.slip_bps,
+    )
+}
+
+pub fn cascade_feed_html(list: &[CascadeRecord]) -> String {
+    if list.is_empty() {
+        return "<div class='warm' style='position:static;padding:22px 0'>no cascades yet</div>".into();
+    }
+    list.iter()
+        .map(cascade_row_html)
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+// ---------------------------------------------------------------------------
+// opportunities panel
+// ---------------------------------------------------------------------------
+
+fn bias_html(b: Option<bool>) -> String {
+    match b {
+        Some(true) => "<span class='bias bull'>BULL</span>".into(),
+        Some(false) => "<span class='bias bear'>BEAR</span>".into(),
+        None => "<span class='bias neut'>SETUP</span>".into(),
+    }
+}
+
+fn strength_color(s: f64) -> &'static str {
+    if s >= 75.0 {
+        "#f5c451"
+    } else if s >= 55.0 {
+        "#97fce4"
+    } else {
+        "#54677d"
+    }
+}
+
+pub fn opps_html(opps: &[Opportunity]) -> String {
+    if opps.is_empty() {
+        return "<div class='warm' style='position:static;padding:30px 0'>no live setups — scanning…</div>"
+            .into();
+    }
+    let mut out = String::new();
+    for o in opps {
+        let mut meta = format!(
+            "<span>{} <b>{}</b></span><span>bias {}</span>",
+            o.kind.label(),
+            o.coin,
+            bias_html(o.side_bias),
+        );
+        if let Some(tp) = o.target_px {
+            meta.push_str(&format!("<span>target <b>{}</b></span>", fmt_px(tp)));
+        }
+        meta.push_str(&format!(
+            "<span>ref <b>{}</b></span><span>ttl {}m</span>",
+            fmt_px(o.ref_px),
+            (o.ttl_ms / 60_000).max(1),
+        ));
+        out.push_str(&format!(
+            "<div class='opp' style='border-left-color:{}'>\
+             <div class='l1'><span class='k' style='background:{}'>{}</span>\
+             <span class='c'>{}</span><span class='str'>{:.0}</span></div>\
+             <div class='title'>{}</div><div class='detail'>{}</div>\
+             <div class='meta'>{meta}</div>\
+             <div class='strbar'><div class='fill' style='width:{:.0}%;background:{}'></div></div></div>",
+            strength_color(o.strength),
+            o.kind.color(),
+            o.kind.label(),
+            o.coin,
+            o.strength,
+            o.title,
+            o.detail,
+            o.strength.clamp(0.0, 100.0),
+            strength_color(o.strength),
+        ));
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// tuning panel
+// ---------------------------------------------------------------------------
+
+/// one control spec; rendered as slider (range) or number input
+struct Ctrl {
+    key: &'static str,
+    label: &'static str,
+    hint: &'static str,
+    min: f64,
+    max: f64,
+    step: f64,
+    /// display transform: value -> shown text
+    kind: CtrlKind,
+}
+
+enum CtrlKind {
+    /// 0..1 -> percent
+    Pct,
+    /// raw number with unit suffix
+    Raw(&'static str),
+    /// ms -> seconds
+    Sec,
+}
+
+impl Ctrl {
+    fn to_display(&self, v: f64) -> String {
+        match self.kind {
+            CtrlKind::Pct => format!("{:.0}%", v * 100.0),
+            CtrlKind::Raw(u) => {
+                if v >= 10_000.0 {
+                    format!("{}{}", fmt_k(v), u)
+                } else {
+                    let s = if self.step < 1.0 {
+                        format!("{v:.1}")
+                    } else {
+                        format!("{v:.0}")
+                    };
+                    format!("{s}{u}")
+                }
+            }
+            CtrlKind::Sec => format!("{:.0}s", v / 1000.0),
+        }
+    }
+}
+
+const GROUPS: &[(&str, &[Ctrl])] = &[
+    (
+        "liquidation precision (stricter LIQ)",
+        &[
+            Ctrl { key: "liq_conf_cap", label: "liq_conf_cap", hint: "minimum confidence for a behavioral LIQ tag — raise for fewer false positives", min: 0.05, max: 0.95, step: 0.01, kind: CtrlKind::Pct },
+            Ctrl { key: "liq_min_sweep_slip_bps", label: "liq_min_sweep_slip_bps", hint: "minimum book-sweep slippage vs the 30s-ago price (bps) — liquidations sweep; voluntary stops usually don't", min: 0.0, max: 50.0, step: 0.5, kind: CtrlKind::Raw("bp") },
+            Ctrl { key: "liq_min_close_frac", label: "liq_min_close_frac", hint: "fraction of the position the burst must close (0..1)", min: 0.30, max: 1.0, step: 0.01, kind: CtrlKind::Pct },
+            Ctrl { key: "liq_min_loss_bps", label: "liq_min_loss_bps", hint: "minimum realized-loss depth on the close (bps of notional)", min: 0.0, max: 100.0, step: 1.0, kind: CtrlKind::Raw("bp") },
+            Ctrl { key: "liq_min_usd", label: "liq_min_usd", hint: "minimum position notional eligible for a behavioral LIQ tag", min: 1000.0, max: 500_000.0, step: 1000.0, kind: CtrlKind::Raw("") },
+        ],
+    ),
+    (
+        "radar / magnet levels",
+        &[
+            Ctrl { key: "radar_bucket_bps", label: "radar_bucket_bps", hint: "radar grid width (bps of price)", min: 5.0, max: 100.0, step: 1.0, kind: CtrlKind::Raw("bp") },
+            Ctrl { key: "radar_level_usd", label: "radar_level_usd", hint: "minimum estimated forced-flow for a level to count as a magnet", min: 5000.0, max: 1_000_000.0, step: 5000.0, kind: CtrlKind::Raw("") },
+            Ctrl { key: "radar_decay_min", label: "radar_decay_min", hint: "armed-level half-life (minutes) — estimates decay as positions adjust", min: 15.0, max: 720.0, step: 15.0, kind: CtrlKind::Raw("m") },
+            Ctrl { key: "radar_confirm_ms", label: "radar_confirm_ms", hint: "window a crossed level waits for forced flow before re-arming", min: 2000.0, max: 60_000.0, step: 1000.0, kind: CtrlKind::Sec },
+        ],
+    ),
+    (
+        "cascades",
+        &[
+            Ctrl { key: "cascade_burst_ms", label: "cascade_burst_ms", hint: "chained-burst gap that finalizes a cascade record", min: 1000.0, max: 30_000.0, step: 500.0, kind: CtrlKind::Sec },
+            Ctrl { key: "cascade_max_ms", label: "cascade_max_ms", hint: "maximum cascade duration before forced finalize", min: 30_000.0, max: 600_000.0, step: 10_000.0, kind: CtrlKind::Sec },
+            Ctrl { key: "cascade_min_usd", label: "cascade_min_usd", hint: "minimum forced USD for a burst to be recorded as a cascade", min: 1000.0, max: 250_000.0, step: 1000.0, kind: CtrlKind::Raw("") },
+        ],
+    ),
+    (
+        "opportunities",
+        &[
+            Ctrl { key: "opp_magnet_usd", label: "opp_magnet_usd", hint: "minimum armed overhang for a magnet-pull opportunity", min: 10_000.0, max: 2_000_000.0, step: 10_000.0, kind: CtrlKind::Raw("") },
+            Ctrl { key: "opp_magnet_dist_pct", label: "opp_magnet_dist_pct", hint: "max distance (%) from price for a magnet to be actionable", min: 0.2, max: 5.0, step: 0.1, kind: CtrlKind::Pct },
+            Ctrl { key: "opp_stop_usd", label: "opp_stop_usd", hint: "minimum stop-cluster USD for a stop-run opportunity", min: 5000.0, max: 500_000.0, step: 5000.0, kind: CtrlKind::Raw("") },
+            Ctrl { key: "opp_whale_usd", label: "opp_whale_usd", hint: "minimum print size for a whale-follow opportunity", min: 25_000.0, max: 1_000_000.0, step: 25_000.0, kind: CtrlKind::Raw("") },
+        ],
+    ),
+];
+
+fn ctrl_value(p: &TuningParams, key: &str) -> f64 {
+    match key {
+        "liq_conf_cap" => p.liq_conf_cap,
+        "liq_min_sweep_slip_bps" => p.liq_min_sweep_slip_bps,
+        "liq_min_close_frac" => p.liq_min_close_frac,
+        "liq_min_loss_bps" => p.liq_min_loss_bps,
+        "liq_min_usd" => p.liq_min_usd,
+        "radar_bucket_bps" => p.radar_bucket_bps,
+        "radar_level_usd" => p.radar_level_usd,
+        "radar_decay_min" => p.radar_decay_min,
+        "radar_confirm_ms" => p.radar_confirm_ms as f64,
+        "cascade_burst_ms" => p.cascade_burst_ms as f64,
+        "cascade_max_ms" => p.cascade_max_ms as f64,
+        "cascade_min_usd" => p.cascade_min_usd,
+        "opp_magnet_usd" => p.opp_magnet_usd,
+        "opp_magnet_dist_pct" => p.opp_magnet_dist_pct,
+        "opp_stop_usd" => p.opp_stop_usd,
+        "opp_whale_usd" => p.opp_whale_usd,
+        _ => 0.0,
+    }
+}
+
+pub fn tuning_html(p: &TuningParams) -> String {
+    let mut out = String::new();
+    for (gname, ctrls) in GROUPS {
+        out.push_str(&format!("<div class='tn-group'>{gname}</div>"));
+        for c in *ctrls {
+            let v = ctrl_value(p, c.key);
+            out.push_str(&format!(
+                "<div class='tn-row'>\
+                 <div class='l'><span>{}</span><b id='tn-d-{}'>{}</b></div>\
+                 <input type='range' class='tn-range' data-key='{}' min='{}' max='{}' step='{}' value='{:.4}'/>\
+                 <div class='hint'>{}</div></div>",
+                c.label,
+                c.key,
+                c.to_display(v),
+                c.key,
+                c.min,
+                c.max,
+                c.step,
+                v,
+                c.hint,
+            ));
+        }
+    }
+    out.push_str(
+        "<div class='tn-actions'>\
+         <button class='tn-btn' id='tn-reset'>RESET DEFAULTS</button>\
+         <button class='tn-btn' id='tn-refresh'>REFRESH</button></div>",
+    );
+    out
+}
+
+/// Format a value for a tuning control's live label.
+pub fn ctrl_display(key: &str, v: f64) -> String {
+    for (_, ctrls) in GROUPS {
+        for c in *ctrls {
+            if c.key == key {
+                return c.to_display(v);
+            }
+        }
+    }
+    format!("{v:.2}")
+}
+
+/// Update only the displayed values of an already-rendered tuning panel.
+pub fn tuning_update_values(p: &TuningParams) -> (Vec<(String, f64)>, Vec<(String, String)>) {
+    let mut sliders: Vec<(String, f64)> = Vec::new();
+    let mut labels: Vec<(String, String)> = Vec::new();
+    for (_, ctrls) in GROUPS {
+        for c in *ctrls {
+            let v = ctrl_value(p, c.key);
+            sliders.push((c.key.to_string(), v));
+            labels.push((format!("tn-d-{}", c.key), c.to_display(v)));
+        }
+    }
+    (sliders, labels)
 }

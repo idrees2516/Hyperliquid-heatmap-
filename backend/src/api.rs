@@ -184,11 +184,113 @@ pub async fn trader_detail(
 pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let coins = state.coins.read().unwrap().len();
     let traders = state.traders.read().unwrap().len();
+    let (radar_coins, cascades) = (
+        state.radar.read().unwrap().len(),
+        state.cascades.lock().unwrap().len(),
+    );
     Json(json!({
         "ok": true,
         "upstream": *state.upstream_alive.read().unwrap(),
         "coins_tracked": coins,
         "wallets_tracked": traders,
+        "radar_coins": radar_coins,
+        "cascades": cascades,
         "uptime_s": (now_ms() - state.started_at) / 1000,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Tuning (live engine parameters)
+// ---------------------------------------------------------------------------
+
+pub async fn tuning_get(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(state.tuning.get())
+}
+
+pub async fn tuning_set(
+    State(state): State<Arc<AppState>>,
+    body: String,
+) -> impl IntoResponse {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "invalid JSON body",
+        )
+            .into_response();
+    };
+    let p = state.tuning.update(&v);
+    state.tuning.save_if_dirty();
+    let _ = state
+        .broadcast
+        .send(crate::engine::EngineEvent::Tuning(p.clone()));
+    Json(p).into_response()
+}
+
+pub async fn tuning_reset(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let p = state.tuning.reset();
+    state.tuning.save_if_dirty();
+    let _ = state
+        .broadcast
+        .send(crate::engine::EngineEvent::Tuning(p.clone()));
+    Json(p).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Radar (magnet levels / cascades / overhang)
+// ---------------------------------------------------------------------------
+
+pub async fn radar(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<RadarQuery>,
+) -> impl IntoResponse {
+    let now = now_ms();
+    let params = state.tuning.get();
+    let r = state.get_or_create_radar(&q.coin);
+    let mut g = r.lock().unwrap();
+    // pick up any cascades finalized since the last tick
+    let drained: Vec<shared::CascadeRecord> =
+        std::mem::take(&mut g.new_cascades).into_iter().collect();
+    drop(g);
+    for rec in drained {
+        state.push_cascade(rec);
+    }
+    let snap = state.get_or_create_radar(&q.coin).lock().unwrap().snapshot(&params, now);
+    Json(snap)
+}
+
+#[derive(serde::Deserialize)]
+pub struct RadarQuery {
+    pub coin: String,
+}
+
+/// Global cascade history (all coins).
+pub async fn cascades(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<CascadeQuery>,
+) -> impl IntoResponse {
+    let limit = q.limit.clamp(1, 500);
+    let rows: Vec<shared::CascadeRecord> = {
+        let g = state.cascades.lock().unwrap();
+        g.iter().rev().take(limit).cloned().collect()
+    };
+    Json(json!({ "records": rows, "n": rows.len() }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct CascadeQuery {
+    #[serde(default = "default_cascade_limit")]
+    pub limit: usize,
+}
+
+fn default_cascade_limit() -> usize {
+    100
+}
+
+// ---------------------------------------------------------------------------
+// Opportunities
+// ---------------------------------------------------------------------------
+
+pub async fn opps(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let rows = crate::engine::opps::build_opps(&state);
+    Json(json!({ "opps": rows, "n": rows.len() }))
 }

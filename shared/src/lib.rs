@@ -343,6 +343,268 @@ pub struct CoinStats {
 }
 
 // ---------------------------------------------------------------------------
+// Tuning (live-tunable engine parameters)
+// ---------------------------------------------------------------------------
+
+/// Live-tunable engine parameters (see the TUNING tab).
+/// All thresholds that gate intent classification + radar/opportunity engines.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TuningParams {
+    // --- liquidation intent precision -----------------------------------
+    /// minimum confidence (0..1) for a behavioral LIQ tag. higher = stricter.
+    pub liq_conf_cap: f64,
+    /// minimum sweep slippage vs the 30s-ago reference price, in bps, for a
+    /// behavioral LIQ tag. higher = stricter (only deep book-sweeps count).
+    pub liq_min_sweep_slip_bps: f64,
+    /// minimum position notional (USD) for a behavioral LIQ tag.
+    pub liq_min_usd: f64,
+    /// minimum fraction of the position closed by the burst (0..1).
+    pub liq_min_close_frac: f64,
+    /// minimum realized loss depth (bps of notional) for a behavioral LIQ tag.
+    pub liq_min_loss_bps: f64,
+
+    // --- radar / magnet levels ------------------------------------------
+    /// radar bucket width as bps of price.
+    pub radar_bucket_bps: f64,
+    /// minimum estimated forced-flow (USD) for a level to count as a magnet.
+    pub radar_level_usd: f64,
+    /// level half-life (minutes): armed estimates decay as positions adjust.
+    pub radar_decay_min: f64,
+    /// a crossed level re-arms (est halved) if no forced flow confirms it
+    /// within this window (ms).
+    pub radar_confirm_ms: i64,
+
+    // --- cascades ---------------------------------------------------------
+    /// chained-burst gap that finalizes a cascade record (ms).
+    pub cascade_burst_ms: i64,
+    /// maximum cascade duration before forced finalize (ms).
+    pub cascade_max_ms: i64,
+    /// minimum total forced USD for a burst to be recorded as a cascade.
+    pub cascade_min_usd: f64,
+
+    // --- opportunities -----------------------------------------------------
+    /// minimum est overhang USD for a magnet-pull opportunity.
+    pub opp_magnet_usd: f64,
+    /// max distance (%) from price for a magnet to be actionable.
+    pub opp_magnet_dist_pct: f64,
+    /// minimum stop-cluster USD for a stop-run opportunity.
+    pub opp_stop_usd: f64,
+    /// minimum whale print USD for a follow-smart-money opportunity.
+    pub opp_whale_usd: f64,
+}
+
+impl Default for TuningParams {
+    fn default() -> Self {
+        TuningParams {
+            // strict liquidation intent: high confidence + real sweep depth
+            liq_conf_cap: 0.55,
+            liq_min_sweep_slip_bps: 3.0,
+            liq_min_usd: 5_000.0,
+            liq_min_close_frac: 0.85,
+            liq_min_loss_bps: 8.0,
+
+            radar_bucket_bps: 25.0,
+            radar_level_usd: 40_000.0,
+            radar_decay_min: 240.0,
+            radar_confirm_ms: 20_000,
+
+            cascade_burst_ms: 6_000,
+            cascade_max_ms: 180_000,
+            cascade_min_usd: 10_000.0,
+
+            opp_magnet_usd: 150_000.0,
+            opp_magnet_dist_pct: 1.5,
+            opp_stop_usd: 100_000.0,
+            opp_whale_usd: 250_000.0,
+        }
+    }
+}
+
+impl TuningParams {
+    /// Clamp every field into a sane operating range.
+    pub fn clamped(&self) -> Self {
+        let mut p = self.clone();
+        p.liq_conf_cap = p.liq_conf_cap.clamp(0.05, 0.99);
+        p.liq_min_sweep_slip_bps = p.liq_min_sweep_slip_bps.clamp(0.0, 200.0);
+        p.liq_min_usd = p.liq_min_usd.clamp(100.0, 5_000_000.0);
+        p.liq_min_close_frac = p.liq_min_close_frac.clamp(0.30, 1.0);
+        p.liq_min_loss_bps = p.liq_min_loss_bps.clamp(0.0, 2_000.0);
+        p.radar_bucket_bps = p.radar_bucket_bps.clamp(5.0, 500.0);
+        p.radar_level_usd = p.radar_level_usd.clamp(1_000.0, 50_000_000.0);
+        p.radar_decay_min = p.radar_decay_min.clamp(10.0, 10_080.0);
+        p.radar_confirm_ms = p.radar_confirm_ms.clamp(2_000, 120_000);
+        p.cascade_burst_ms = p.cascade_burst_ms.clamp(1_000, 60_000);
+        p.cascade_max_ms = p.cascade_max_ms.clamp(30_000, 900_000);
+        p.cascade_min_usd = p.cascade_min_usd.clamp(1_000.0, 10_000_000.0);
+        p.opp_magnet_usd = p.opp_magnet_usd.clamp(5_000.0, 50_000_000.0);
+        p.opp_magnet_dist_pct = p.opp_magnet_dist_pct.clamp(0.1, 10.0);
+        p.opp_stop_usd = p.opp_stop_usd.clamp(1_000.0, 50_000_000.0);
+        p.opp_whale_usd = p.opp_whale_usd.clamp(10_000.0, 50_000_000.0);
+        p
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Radar: magnet levels / cascades / overhang
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LevelState {
+    /// armed estimate: forced flow would trigger here if price reaches it
+    Armed,
+    /// price is trading through the level, awaiting forced-flow confirmation
+    Engaged,
+    /// liquidated / consumed
+    Swept,
+}
+
+impl LevelState {
+    pub fn label(self) -> &'static str {
+        match self {
+            LevelState::Armed => "ARMED",
+            LevelState::Engaged => "ENGAGED",
+            LevelState::Swept => "SWEPT",
+        }
+    }
+}
+
+/// One magnet level on the liquidation radar.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RadarLevel {
+    /// bucket center price
+    pub px: f64,
+    /// true = long positions liquidate here (sell pressure below price),
+    /// false = short positions liquidate here (buy pressure above price)
+    pub long: bool,
+    /// estimated forced-flow notional still armed (USD)
+    pub est_usd: f64,
+    /// peak estimated notional this level has carried
+    pub peak_usd: f64,
+    /// observed forced flow at this level (USD)
+    pub swept_usd: f64,
+    pub state: LevelState,
+    pub t_first: i64,
+    pub t_last: i64,
+    /// number of times this level has been crossed
+    pub hits: u32,
+}
+
+/// A completed (or live) liquidation cascade record.
+/// Persisted so overhang signals survive restarts.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CascadeRecord {
+    pub coin: String,
+    pub t_start: i64,
+    pub t_end: i64,
+    /// true = longs were liquidated (forced selling, downside move)
+    pub long: bool,
+    pub usd: f64,
+    pub fills: u32,
+    pub wallets: u32,
+    pub px_lo: f64,
+    pub px_hi: f64,
+    /// deepest observed sweep slippage (bps)
+    pub slip_bps: f64,
+    /// armed-level estimates consumed on the way (bucket prices)
+    pub levels: Vec<f64>,
+    pub live: bool,
+}
+
+/// Overhang summary: armed forced-flow within reach of the current price.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct OverhangInfo {
+    pub px: f64,
+    /// total armed long-liq flow within 5% below price
+    pub long_usd_5: f64,
+    /// total armed short-liq flow within 5% above price
+    pub short_usd_5: f64,
+    /// nearest armed long-liq level below price
+    pub long_nearest_px: Option<f64>,
+    pub long_nearest_usd: f64,
+    /// nearest armed short-liq level above price
+    pub short_nearest_px: Option<f64>,
+    pub short_nearest_usd: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RadarSnapshot {
+    pub coin: String,
+    pub px: f64,
+    pub bucket: f64,
+    pub levels: Vec<RadarLevel>,
+    pub overhang: OverhangInfo,
+    pub last_cascade: Vec<CascadeRecord>,
+    pub updated_at: i64,
+}
+
+// ---------------------------------------------------------------------------
+// Opportunities
+// ---------------------------------------------------------------------------
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OppKind {
+    /// armed magnet level near price — price tends to be pulled into it
+    MagnetPull,
+    /// cascade just completed — forced flow exhausted, mean-reversion window
+    CascadeExhaustion,
+    /// cascade printing right now
+    SweepLive,
+    /// stop cluster above/below price got run — continuation
+    StopRun,
+    /// one-sided aggressive delta with flat price = passive absorption
+    DeltaDivergence,
+    /// large print from a historically winning wallet
+    WhalePrint,
+    /// swept cascade level acting as support/resistance on retest
+    SweptLevel,
+}
+
+impl OppKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            OppKind::MagnetPull => "MAGNET",
+            OppKind::CascadeExhaustion => "EXHAUST",
+            OppKind::SweepLive => "SWEEP",
+            OppKind::StopRun => "STOP-RUN",
+            OppKind::DeltaDivergence => "ABSORB",
+            OppKind::WhalePrint => "WHALE",
+            OppKind::SweptLevel => "S/R",
+        }
+    }
+    pub fn color(self) -> &'static str {
+        match self {
+            OppKind::MagnetPull => "#f5c451",
+            OppKind::CascadeExhaustion => "#97fce4",
+            OppKind::SweepLive => "#f97316",
+            OppKind::StopRun => "#ef4444",
+            OppKind::DeltaDivergence => "#a78bfa",
+            OppKind::WhalePrint => "#22c55e",
+            OppKind::SweptLevel => "#7dd3fc",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Opportunity {
+    pub id: String,
+    pub kind: OppKind,
+    pub coin: String,
+    pub title: String,
+    pub detail: String,
+    /// 0..100, computed by the engine
+    pub strength: f64,
+    pub t: i64,
+    pub ref_px: f64,
+    pub target_px: Option<f64>,
+    /// true = bullish bias, false = bearish, None = neutral/setup
+    pub side_bias: Option<bool>,
+    /// how long this row stays live (ms)
+    pub ttl_ms: i64,
+}
+
+// ---------------------------------------------------------------------------
 // Bucket sizing
 // ---------------------------------------------------------------------------
 

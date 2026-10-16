@@ -6,6 +6,11 @@
 //!   which is where liquidation events surface per user
 //! - backfills candles + recent trades on coin activation
 //! - reconnects with backoff, heartbeats with pings
+//!
+//! NOTE: only coins present in the live asset universe (or the static
+//! fallback set) are ever subscribed. Hyperliquid resets the whole socket
+//! when a subscription references a delisted/unknown coin, so this guard
+//! is load-bearing for connection stability.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -18,13 +23,16 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::engine::{now_ms, AppState, SubCmd};
 
 const HL_WS_URL: &str = "wss://api.hyperliquid.xyz/ws";
-const DEFAULT_COINS: usize = 10;
-const WATCH_USERS: usize = 48;
+const DEFAULT_COINS: usize = 16;
+/// Hyperliquid rejects more than 15 `userEvents` subscriptions per
+/// connection ("Cannot track more than 15 total users"), so only the very
+/// largest position holders are watched.
+const WATCH_USERS: usize = 15;
 
 /// Runs the subscription managers + connection supervisor forever.
 pub async fn run_upstream(state: Arc<AppState>, mut cmds: mpsc::UnboundedReceiver<SubCmd>) {
-    let (coin_tx, coin_rx) = watch::channel(HashSet::<String>::new());
-    let (user_tx, user_rx) = watch::channel(HashSet::<String>::new());
+    let (coin_tx, _coin_rx) = watch::channel(HashSet::<String>::new());
+    let (user_tx, _user_rx) = watch::channel(HashSet::<String>::new());
 
     // ---- coin subscription manager --------------------------------------------
     {
@@ -199,9 +207,15 @@ async fn run_connection(
 ) -> anyhow::Result<()> {
     let (mut sink, mut stream) = ws.split();
 
-    // subscribe to active coins
+    // subscribe to active coins (universe-guarded: a delisted coin would
+    // otherwise get the whole socket reset by the upstream)
     let mut subscribed_coins: HashSet<String> = HashSet::new();
-    let initial_coins: Vec<String> = coin_tx.borrow().iter().cloned().collect();
+    let initial_coins: Vec<String> = coin_tx
+        .borrow()
+        .iter()
+        .cloned()
+        .filter(|c| state.coin_tradable(c))
+        .collect();
     for c in initial_coins {
         send_json(&mut sink, serde_json::json!({"method":"subscribe","subscription":{"type":"trades","coin":c}})).await;
         send_json(&mut sink, serde_json::json!({"method":"subscribe","subscription":{"type":"candle","coin":c,"interval":"1m"}})).await;
@@ -215,6 +229,12 @@ async fn run_connection(
         send_json(&mut sink, serde_json::json!({"method":"subscribe","subscription":{"type":"userEvents","user":u}})).await;
         subscribed_users.insert(u);
     }
+
+    // NOTE: there is no market-wide liquidation channel on Hyperliquid's
+    // WS API (wLiquidation/wDeleveraging are not valid subscription types
+    // there); liquidations are surfaced per user through `userEvents`
+    // above, plus detected behaviorally by the strict LIQ gates in the
+    // engine (see engine/tuning.rs).
 
     // heartbeat
     let (hb_tx, mut hb_rx) = mpsc::channel::<()>(8);
@@ -243,7 +263,11 @@ async fn run_connection(
             }
             _ = coin_rx.changed() => {
                 let new_set = coin_rx.borrow_and_update().clone();
-                let to_add: Vec<String> = new_set.difference(&subscribed_coins).cloned().collect();
+                let to_add: Vec<String> = new_set
+                    .difference(&subscribed_coins)
+                    .filter(|c| state.coin_tradable(c))
+                    .cloned()
+                    .collect();
                 for c in to_add {
                     send_json(&mut sink, serde_json::json!({"method":"subscribe","subscription":{"type":"trades","coin":c}})).await;
                     send_json(&mut sink, serde_json::json!({"method":"subscribe","subscription":{"type":"candle","coin":c,"interval":"1m"}})).await;
@@ -310,6 +334,12 @@ async fn run_connection(
             "userEvents" => {
                 handle_user_events(&state, &env.data);
             }
+            "wLiquidation" => {
+                handle_user_events(&state, &env.data);
+            }
+            "wDeleveraging" => {
+                handle_deleveraging(&state, &env.data);
+            }
             "error" => {
                 tracing::warn!("upstream ws error frame: {}", &txt[..txt.len().min(200)]);
             }
@@ -357,6 +387,45 @@ fn handle_user_events(state: &Arc<AppState>, v: &serde_json::Value) {
                 mark_px: None,
             };
             state.process_liquidation(&user, &inner, t);
+        }
+    }
+}
+
+/// Extract deleveraging events from `wDeleveraging` payloads (flexible shapes).
+fn handle_deleveraging(state: &Arc<AppState>, v: &serde_json::Value) {
+    let events: Vec<serde_json::Value> = match v {
+        serde_json::Value::Array(a) => a.clone(),
+        obj @ serde_json::Value::Object(_) => vec![obj.clone()],
+        _ => return,
+    };
+    let t = now_ms();
+    for ev in events {
+        // shapes seen: {"user": .., "coin": .., "users": [..]} / {"deleveraging": {...}}
+        let obj = ev.get("deleveraging").unwrap_or(&ev);
+        let coin = obj
+            .get("coin")
+            .and_then(|c| c.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let users: Vec<String> = obj
+            .get("users")
+            .and_then(|u| u.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let single = obj
+            .get("user")
+            .and_then(|u| u.as_str())
+            .map(|s| s.to_string());
+        let mut all = users;
+        if let Some(u) = single {
+            all.push(u);
+        }
+        if !all.is_empty() && !coin.is_empty() {
+            state.process_deleveraging(&all, &coin, t);
         }
     }
 }

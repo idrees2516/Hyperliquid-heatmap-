@@ -114,6 +114,15 @@ async fn client_socket(socket: WebSocket, state: Arc<AppState>) {
                         crate::engine::EngineEvent::Traders { coin, rows } => want_coin
                             .filter(|c| *coin == *c)
                             .map(|_| json!({"type": "traders", "coin": coin, "data": rows}).to_string()),
+                        crate::engine::EngineEvent::Radar { coin, snapshot } => want_coin
+                            .filter(|c| *coin == *c)
+                            .map(|_| json!({"type": "radar", "coin": coin, "data": snapshot}).to_string()),
+                        crate::engine::EngineEvent::Opps(opps) => {
+                            Some(json!({"type": "opps", "data": opps}).to_string())
+                        }
+                        crate::engine::EngineEvent::Tuning(p) => {
+                            Some(json!({"type": "tuning", "data": p}).to_string())
+                        }
                     };
                     if let Some(t) = txt {
                         if tx.send(Message::Text(t.into())).await.is_err() {

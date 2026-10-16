@@ -1,10 +1,15 @@
 //! Engine: central application state + trade/liquidation/candle processing.
 
 pub mod market;
+pub mod opps;
+pub mod persist;
+pub mod radar;
 pub mod tasks;
 pub mod traders;
+pub mod tuning;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -22,8 +27,13 @@ pub fn now_ms() -> i64 {
 }
 
 /// Markets tracked even when the assets REST endpoint is rate-limited / down,
-/// so the realtime pipeline always has flow.
-pub const FALLBACK_COINS: &[&str] = &["BTC", "ETH", "SOL", "HYPE", "XRP", "DOGE"];
+/// so the realtime pipeline always has flow. Extended majors set.
+/// All names must exist in Hyperliquid's perp universe: subscribing to a
+/// delisted/unknown coin makes the upstream reset the whole socket.
+pub const FALLBACK_COINS: &[&str] = &[
+    "BTC", "ETH", "SOL", "HYPE", "XRP", "DOGE", "BNB", "ADA", "AVAX", "LINK",
+    "TRX", "SUI", "LTC", "ZEC", "ARB", "OP", "NEAR", "APT", "TIA", "WIF",
+];
 
 /// Commands to the upstream subscription manager.
 #[derive(Clone, Debug)]
@@ -40,6 +50,9 @@ pub enum EngineEvent {
     Liquidation(LiveLiquidation),
     Candle { coin: String, candle: Candle },
     Traders { coin: String, rows: Vec<TraderRow> },
+    Radar { coin: String, snapshot: shared::RadarSnapshot },
+    Opps(Vec<shared::Opportunity>),
+    Tuning(shared::TuningParams),
     Status { upstream: bool },
 }
 
@@ -47,12 +60,20 @@ pub struct AppState {
     pub assets: RwLock<Vec<AssetInfo>>,
     pub coins: RwLock<HashMap<String, Arc<market::CoinState>>>,
     pub traders: RwLock<HashMap<String, Arc<Mutex<traders::TraderState>>>>,
+    /// liquidation radar per coin (persisted)
+    pub radar: RwLock<HashMap<String, Arc<Mutex<radar::RadarState>>>>,
+    /// global recent cascade records (persisted), newest last
+    pub cascades: Mutex<VecDeque<shared::CascadeRecord>>,
     pub broadcast: broadcast::Sender<EngineEvent>,
     pub sub_cmds: mpsc::UnboundedSender<SubCmd>,
     pub rest: crate::hl::rest::HlRest,
     pub started_at: i64,
     pub upstream_alive: RwLock<bool>,
     pub default_coins: RwLock<Vec<String>>,
+    /// live-tunable engine parameters (persisted)
+    pub tuning: Arc<tuning::Tuning>,
+    pub persist: persist::Persist,
+    pub data_dir: PathBuf,
     /// pending liquidations awaiting their matching trade
     pending_liq: Mutex<HashMap<(String, String), (i64, bool)>>,
 }
@@ -60,16 +81,39 @@ pub struct AppState {
 impl AppState {
     pub fn new(rest: crate::hl::rest::HlRest, sub_cmds: mpsc::UnboundedSender<SubCmd>) -> Arc<Self> {
         let (tx, _) = broadcast::channel(8192);
+        let data_dir = std::env::var("FOOTPRINT_DATA_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("data"));
+        let persist = persist::Persist::new(&data_dir);
+        let tuning = Arc::new(tuning::Tuning::load_or_default(&data_dir));
+        // restore radar + cascade history so overhang signals survive restarts
+        let mut radar_map: HashMap<String, Arc<Mutex<radar::RadarState>>> = HashMap::new();
+        for pr in persist.load_radar() {
+            let coin = pr.coin.clone();
+            radar_map.insert(coin, Arc::new(Mutex::new(radar::RadarState::from_persist(pr))));
+        }
+        if !radar_map.is_empty() {
+            tracing::info!(coins = radar_map.len(), "restored radar levels from disk");
+        }
+        let cascades = persist.load_cascades();
+        if !cascades.is_empty() {
+            tracing::info!(n = cascades.len(), "restored cascade history from disk");
+        }
         Arc::new(Self {
             assets: RwLock::new(Vec::new()),
             coins: RwLock::new(HashMap::new()),
             traders: RwLock::new(HashMap::new()),
+            radar: RwLock::new(radar_map),
+            cascades: Mutex::new(cascades),
             broadcast: tx,
             sub_cmds,
             rest,
             started_at: now_ms(),
             upstream_alive: RwLock::new(false),
             default_coins: RwLock::new(Vec::new()),
+            tuning,
+            persist,
+            data_dir,
             pending_liq: Mutex::new(HashMap::new()),
         })
     }
@@ -89,6 +133,42 @@ impl AppState {
 
     pub fn get_coin(&self, coin: &str) -> Option<Arc<market::CoinState>> {
         self.coins.read().unwrap().get(coin).cloned()
+    }
+
+    pub fn get_or_create_radar(&self, coin: &str) -> Arc<Mutex<radar::RadarState>> {
+        if let Some(r) = self.radar.read().unwrap().get(coin) {
+            return r.clone();
+        }
+        let mut w = self.radar.write().unwrap();
+        w.entry(coin.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(radar::RadarState::new(coin))))
+            .clone()
+    }
+
+    pub fn get_radar(&self, coin: &str) -> Option<Arc<Mutex<radar::RadarState>>> {
+        self.radar.read().unwrap().get(coin).cloned()
+    }
+
+    /// May we subscribe to this coin upstream? Subscribing to a coin that
+    /// is not in Hyperliquid's live perp universe makes the upstream reset
+    /// the whole WebSocket connection, so guard every subscription. While
+    /// the universe is still loading (empty assets), only the static
+    /// fallback set is considered tradable.
+    pub fn coin_tradable(&self, coin: &str) -> bool {
+        let assets = self.assets.read().unwrap();
+        if assets.is_empty() {
+            return FALLBACK_COINS.iter().any(|c| *c == coin);
+        }
+        assets.iter().any(|a| a.name == coin)
+    }
+
+    /// Register a freshly finalized cascade into the global history.
+    pub fn push_cascade(&self, rec: shared::CascadeRecord) {
+        let mut q = self.cascades.lock().unwrap();
+        q.push_back(rec);
+        while q.len() > persist::MAX_GLOBAL_CASCADES {
+            q.pop_front();
+        }
     }
 
     fn get_trader(&self, addr: &str, t: i64) -> Arc<Mutex<traders::TraderState>> {
@@ -131,9 +211,24 @@ impl AppState {
         }
         let usd = px * sz;
         let now = raw.time;
+        let params = self.tuning.get();
+
+        // sweep slippage vs the price ~30s ago (measures how deep this print
+        // went through the book, relative to recent trading)
+        let ref_px = self.px_lag(&raw.coin, now, 30_000);
+        let slip_bps = if ref_px > 0.0 {
+            let raw_slip = if side.is_buy() {
+                (px - ref_px) / ref_px
+            } else {
+                (ref_px - px) / ref_px
+            };
+            (raw_slip * 10_000.0).max(0.0)
+        } else {
+            0.0
+        };
 
         // 1. position / intent for taker
-        let (action, rpn, pending, hedge, pos_before_abs, pos_after_abs) = {
+        let (action, rpn, pending, hedge, pos_before_abs, pos_after_abs, burst) = {
             let ts = self.get_trader(&taker, now);
             let mut g = ts.lock().unwrap();
             g.last_seen = now;
@@ -171,8 +266,16 @@ impl AppState {
                     .unwrap_or(false)
             };
             let hedge = traders::hedge_match(&g.recent, &raw.coin, side.is_buy(), usd, now);
+            // burst: same-direction aggressive prints by this wallet in ~3s
+            let burst = 1 + g
+                .recent
+                .iter()
+                .rev()
+                .take(24)
+                .filter(|(t, c, b, _)| *c == raw.coin && *b == side.is_buy() && now - *t <= 3_000)
+                .count() as u32;
             g.push_recent(now, &raw.coin, side.is_buy(), usd);
-            (action, rpn, pending, hedge, pos_before_abs, pos_after_abs)
+            (action, rpn, pending, hedge, pos_before_abs, pos_after_abs, burst)
         };
 
         let mut intent = traders::classify_intent(action, rpn, usd, pending, side);
@@ -180,17 +283,29 @@ impl AppState {
             intent = Intent::Hedge;
         }
 
-        // behavioral liquidation: aggressive full close of a losing position.
-        // The liquidation engine force-closes the whole position; a voluntary
-        // stop usually leaves remainder or was placed earlier.
+        // --- strict behavioral liquidation gate ---------------------------
+        // A forced close must look like one: near-full close of a real loss,
+        // printed as an aggressive burst that swept the book. Confidence and
+        // sweep depth are tunable live (liq_conf_cap / liq_min_sweep_slip_bps).
+        let close_frac = if pos_before_abs > 0.0 {
+            ((pos_before_abs - pos_after_abs) / pos_before_abs).max(0.0)
+        } else {
+            0.0
+        };
+        let loss_bps = if usd > 0.0 { (-rpn).max(0.0) / usd * 10_000.0 } else { 0.0 };
+        let signal = tuning::LiqSignal {
+            close_frac,
+            loss_bps,
+            burst,
+            slip_bps,
+            usd: pos_before_abs * px,
+        };
+        let verdict = tuning::liq_verdict(&signal, &params, pending);
         let mut liq_forced = false;
-        if !pending
-            && matches!(action, shared::Action::Reduce | shared::Action::Flip)
-            && rpn < 0.0
-            && pos_before_abs > 0.0
-            && pos_after_abs <= pos_before_abs * 0.05
-            && pos_before_abs * px >= 1_500.0
-        {
+        if !pending && verdict.is_liq {
+            intent = Intent::Liquidation;
+            liq_forced = true;
+        } else if pending {
             intent = Intent::Liquidation;
             liq_forced = true;
         }
@@ -244,7 +359,27 @@ impl AppState {
             }
         }
 
-        // 3. behavioral liquidation event (full close of a losing position)
+        // 3. radar: every aggressive open/increase seeds magnet levels,
+        //    every print advances the price/sweep lifecycle
+        {
+            let radar = self.get_or_create_radar(&raw.coin);
+            let mut r = radar.lock().unwrap();
+            if matches!(action, shared::Action::Open | shared::Action::Increase)
+                && matches!(intent, Intent::Aggressive)
+                && usd >= 5_000.0
+            {
+                r.on_open(px, usd, side.is_buy(), now, &params);
+            }
+            r.on_price(px, now, &params);
+            if liq_forced {
+                // forced flow observed: feed the burst aggregator
+                r.on_liq_fill(px, usd, !side.is_buy(), &taker, slip_bps, now, &params);
+            }
+        }
+        // pick up freshly finalized cascades into the global history
+        self.drain_new_cascades(&raw.coin);
+
+        // 4. behavioral liquidation event (strict-gated burst close)
         if liq_forced {
             let long = !side.is_buy();
             let liq_usd = pos_before_abs * px;
@@ -280,7 +415,7 @@ impl AppState {
             self.retro_tag(&raw.coin, &taker, now, Intent::Liquidation);
         }
 
-        // 4. broadcast
+        // 5. broadcast
         let (style, pnl, tag) = {
             let ts = self.traders.read().unwrap().get(&taker).cloned();
             match ts {
@@ -310,8 +445,52 @@ impl AppState {
         }));
     }
 
+    /// Price as of `lag_ms` ago for a coin (from the stored tape).
+    fn px_lag(&self, coin: &str, now: i64, lag_ms: i64) -> f64 {
+        let Some(cs) = self.get_coin(coin) else { return 0.0 };
+        let inner = cs.inner.lock().unwrap();
+        let target = now - lag_ms;
+        // trades is time-ascending: last trade with t <= target
+        let mut lo = 0usize;
+        let mut hi = inner.trades.len();
+        let mut found = None;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if inner.trades[mid].t <= target {
+                found = Some(mid);
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        match found {
+            Some(i) => inner.trades[i].px,
+            None => inner.trades.front().map(|t| t.px).unwrap_or(0.0),
+        }
+    }
+
+    /// Move finalized cascade records from a coin's radar into the global list.
+    fn drain_new_cascades(&self, coin: &str) {
+        let radar = self.get_or_create_radar(coin);
+        let drained: Vec<shared::CascadeRecord> = {
+            let mut r = radar.lock().unwrap();
+            std::mem::take(&mut r.new_cascades).into_iter().collect()
+        };
+        if !drained.is_empty() {
+            for rec in drained {
+                tracing::info!(
+                    coin = %rec.coin,
+                    usd = rec.usd,
+                    long = rec.long,
+                    "cascade finalized"
+                );
+                self.push_cascade(rec);
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
-    // Liquidations
+    // Liquidations (confirmed on-chain events)
     // -----------------------------------------------------------------------
 
     pub fn process_liquidation(&self, user: &str, liq: &HlLiqInner, t: i64) {
@@ -321,6 +500,18 @@ impl AppState {
         // side in liquidation event: direction of the position that got liquidated
         // B = long position liquidated, A = short position liquidated
         let long = matches!(liq.side.as_str(), "B" | "b" | "long" | "Buy" | "buy");
+        let params = self.tuning.get();
+        // slippage vs the reported mark when available
+        let slip_bps = liq
+            .mark_px
+            .as_ref()
+            .and_then(|m| m.parse::<f64>().ok())
+            .filter(|m| *m > 0.0)
+            .map(|m| {
+                let raw = if long { (m - px) / m } else { (px - m) / m };
+                (raw * 10_000.0).max(0.0)
+            })
+            .unwrap_or(0.0);
         let coin_state = self.get_or_create_coin(&liq.coin);
         {
             let mut inner = coin_state.inner.lock().unwrap();
@@ -350,10 +541,17 @@ impl AppState {
             let ts = self.get_trader(user, t);
             let mut g = ts.lock().unwrap();
             g.liq_count += 1;
-            if g.label.is_none() {
-                // liquidated wallets are notable
+        }
+        // radar: confirmed forced flow at this price
+        {
+            let radar = self.get_or_create_radar(&liq.coin);
+            let mut r = radar.lock().unwrap();
+            r.on_liq_fill(px, usd, long, user, slip_bps, t, &params);
+            if usd >= params.cascade_min_usd {
+                r.sweep_at(px, usd, long, t, &params);
             }
         }
+        self.drain_new_cascades(&liq.coin);
         // pending marker so the matching trade (if it comes after) is tagged
         self.pending_liq
             .lock()

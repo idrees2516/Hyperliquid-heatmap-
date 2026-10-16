@@ -7,9 +7,8 @@ mod engine;
 mod hl;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
@@ -36,6 +35,10 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(engine::tasks::run_assets_poll(state.clone()));
     tokio::spawn(engine::tasks::run_enrichment(state.clone()));
     tokio::spawn(engine::tasks::run_traders_push(state.clone()));
+    tokio::spawn(engine::tasks::run_radar_push(state.clone()));
+    tokio::spawn(engine::tasks::run_opps_push(state.clone()));
+    tokio::spawn(engine::tasks::run_persist(state.clone()));
+    tokio::spawn(engine::tasks::run_shutdown_flush(state.clone()));
 
     // static frontend (built by trunk into dist/)
     let dist = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -50,6 +53,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/level", get(api::level))
         .route("/api/traders", get(api::traders))
         .route("/api/trader/{addr}", get(api::trader_detail))
+        .route("/api/tuning", get(api::tuning_get).post(api::tuning_set))
+        .route("/api/tuning/reset", post(api::tuning_reset))
+        .route("/api/radar", get(api::radar))
+        .route("/api/cascades", get(api::cascades))
+        .route("/api/opps", get(api::opps))
         .route("/api/health", get(api::health))
         .route("/ws", get(clientws::ws_handler))
         .fallback_service(ServeDir::new(&dist))

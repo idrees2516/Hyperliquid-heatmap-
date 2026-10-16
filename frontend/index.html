@@ -69,10 +69,32 @@ header{
 
 /* ---------- right sidebar ---------- */
 aside{
-  grid-column:2;display:grid;grid-template-rows:auto 176px 1fr 252px;
+  grid-column:2;display:grid;grid-template-rows:auto auto 1fr;
   background:var(--panel);border-left:1px solid var(--line);min-height:0;
 }
+.side-tabs{
+  display:flex;border-bottom:1px solid var(--line);background:var(--panel2);flex:none;
+}
+.side-tab{
+  flex:1;text-align:center;padding:8px 0;cursor:pointer;font-family:inherit;
+  font-size:9.5px;font-weight:700;letter-spacing:1px;color:var(--dim);
+  background:transparent;border:none;border-right:1px solid var(--line);
+}
+.side-tab:last-child{border-right:none}
+.side-tab.active{background:#132433;color:var(--accent)}
+.side-tab:hover:not(.active){color:var(--txt)}
+.side-tab .badge-n{
+  display:inline-block;min-width:14px;margin-left:3px;padding:0 3px;border-radius:6px;
+  background:#233246;color:var(--accent);font-size:8.5px;line-height:12px;vertical-align:1px;
+}
+.side-view{display:none;grid-template-rows:auto 176px 1fr 252px;min-height:0}
+.side-view.active{display:grid}
+#view-live{grid-template-rows:auto 176px 1fr 252px}
+#view-radar{grid-template-rows:auto 1fr 190px}
+#view-opps{grid-template-rows:1fr}
+#view-tune{grid-template-rows:1fr}
 .panel{border-bottom:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+.panel:last-child{border-bottom:none}
 .panel-h{
   display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--panel2);
   border-bottom:1px solid var(--line);font-size:10px;font-weight:700;letter-spacing:1.2px;color:var(--dim);
@@ -145,6 +167,75 @@ aside{
 .tr-row .wr{min-width:52px;text-align:right}
 .tr-row .liqn{color:var(--gold);font-weight:700}
 
+/* radar */
+#radar-head{padding:8px 12px;border-bottom:1px solid var(--line);font-size:10.5px}
+#radar-head .big{font-size:13px;font-weight:700;color:var(--bright)}
+#radar-head .sub{color:var(--dim);font-size:9.5px;margin-top:2px}
+#radar-head .pill{display:inline-block;padding:1px 6px;border-radius:4px;border:1px solid var(--line2);margin-right:4px}
+#radar-levels{flex:1;overflow-y:auto;min-height:0}
+.rl-row{display:grid;grid-template-columns:1fr 34px 64px 52px 44px;gap:6px;align-items:center;padding:3.5px 12px;font-size:10.2px;border-bottom:1px solid rgba(21,32,46,.5)}
+.rl-row .px{color:var(--bright);font-weight:700;text-align:right}
+.rl-row .dist{text-align:right;color:var(--dim)}
+.rl-row .amt{font-weight:700;text-align:right}
+.rl-row .amt.long{color:var(--sell)} .rl-row .amt.short{color:var(--buy)}
+.rl-row .st{font-size:8px;font-weight:700;text-align:center;border-radius:3px;padding:1.5px 0}
+.rl-row .st.armed{background:#3a2e10;color:var(--gold)}
+.rl-row .st.engaged{background:#0f2f4a;color:#7dd3fc}
+.rl-row .st.swept{background:#15242c;color:var(--dim)}
+.rl-row .bar{height:3px;background:#111a26;border-radius:2px;grid-column:1/6;overflow:hidden}
+.rl-row .bar .fill{height:100%;background:var(--gold)}
+#cascade-feed{overflow-y:auto;min-height:0}
+.cas-row{display:grid;grid-template-columns:52px 40px 30px 66px 60px 44px;gap:5px;padding:3.5px 12px;font-size:10.2px;border-bottom:1px solid rgba(21,32,46,.5);align-items:center}
+.cas-row .t{color:var(--dim)}
+.cas-row .c{color:var(--bright);font-weight:700}
+.cas-row .dir{font-weight:700;font-size:9.5px;text-align:center}
+.cas-row .dir.long{color:var(--sell)} .cas-row .dir.short{color:var(--buy)}
+.cas-row .usd{color:var(--gold);font-weight:700;text-align:right}
+.cas-row .move{text-align:right;color:var(--dim)}
+.cas-row .slip{text-align:right;color:#7dd3fc}
+.cas-row.live{background:rgba(249,115,22,.08)}
+.cas-row.live .usd::after{content:" ·live";font-size:8px}
+
+/* opportunities */
+#opps-scroll{flex:1;overflow-y:auto;min-height:0;padding:6px 0}
+.opp{
+  margin:6px 10px;padding:8px 10px;border:1px solid var(--line2);border-left:3px solid var(--gold);
+  border-radius:7px;background:var(--panel2);position:relative;
+}
+.opp .l1{display:flex;align-items:center;gap:7px;margin-bottom:3px}
+.opp .k{font-size:8.5px;font-weight:700;letter-spacing:.8px;color:#05070c;border-radius:3px;padding:1.5px 5px}
+.opp .c{color:var(--bright);font-weight:700;font-size:11px}
+.opp .str{margin-left:auto;font-weight:700;color:var(--bright)}
+.opp .title{color:var(--txt);font-weight:600;font-size:10.5px;margin-bottom:2px}
+.opp .detail{color:var(--dim);font-size:9.6px;line-height:1.5}
+.opp .meta{display:flex;gap:10px;margin-top:5px;font-size:9.4px;color:var(--dim)}
+.opp .meta b{color:var(--txt)}
+.opp .bias{font-weight:700}
+.opp .bias.bull{color:var(--buy)} .opp .bias.bear{color:var(--sell)} .opp .bias.neut{color:var(--dim)}
+.opp .strbar{height:3px;border-radius:2px;background:#111a26;margin-top:6px;overflow:hidden}
+.opp .strbar .fill{height:100%}
+
+/* tuning */
+#tune-scroll{flex:1;overflow-y:auto;min-height:0;padding:8px 12px 20px}
+.tn-group{margin:12px 0 6px;font-size:9.5px;font-weight:700;letter-spacing:1.2px;color:var(--dim);text-transform:uppercase;border-bottom:1px solid var(--line);padding-bottom:4px}
+.tn-row{margin:9px 0}
+.tn-row .l{display:flex;justify-content:space-between;font-size:10.4px;margin-bottom:3px}
+.tn-row .l b{color:var(--bright)}
+.tn-row .hint{font-size:9.2px;color:var(--dim);margin-top:3px;line-height:1.45}
+.tn-row input[type=range]{width:100%;accent-color:#2fbf9b;cursor:pointer}
+.tn-row input[type=number]{
+  width:110px;background:var(--panel2);color:var(--bright);border:1px solid var(--line2);border-radius:5px;
+  font-family:inherit;font-size:11px;padding:4px 7px;outline:none;text-align:right;
+}
+.tn-actions{display:flex;gap:8px;margin-top:14px}
+.tn-btn{
+  flex:1;background:#132433;color:var(--accent);border:1px solid #1e3d38;border-radius:6px;
+  font-family:inherit;font-size:10.5px;font-weight:700;padding:7px 0;cursor:pointer;
+}
+.tn-btn:hover{background:#183049}
+.tn-save{position:fixed;bottom:38px;right:8px;z-index:6;background:#1d3a31;color:#9fe8c8;border:1px solid #2b5c4c;
+  border-radius:6px;padding:5px 10px;font-size:10px;font-weight:700;display:none}
+
 /* ---------- footer ---------- */
 footer{
   grid-column:1/3;display:flex;align-items:center;gap:16px;padding:0 14px;
@@ -216,36 +307,74 @@ table.mtab .up{color:var(--buy)} table.mtab .down{color:var(--sell)} table.mtab 
 </div>
 
 <aside>
-  <section class="panel" id="flow-panel">
-    <div class="panel-h">On-chain flow · session</div>
-    <div id="flow">
-      <div class="delta-line"><b id="flow-delta">—</b><span id="flow-note">net taker delta</span></div>
-      <div class="split-bar"><div class="b" id="flow-bar-b" style="width:50%"></div><div class="s" id="flow-bar-s" style="width:50%"></div></div>
-      <div class="split-lbl"><span class="bb" id="flow-buy">BUY —</span><span class="ss" id="flow-sell">SELL —</span></div>
-      <div class="chips">
-        <span class="chip" style="color:#f97316">LIQ <b id="f-liq">$0</b></span>
-        <span class="chip" style="color:#ef4444">STOP <b id="f-stop">$0</b></span>
-        <span class="chip" style="color:#22c55e">TP <b id="f-tp">$0</b></span>
-        <span class="chip" style="color:#a78bfa">HEDGE <b id="f-hedge">$0</b></span>
-        <span class="chip" id="f-prints">0 prints</span>
+  <div class="side-tabs">
+    <button class="side-tab active" data-view="live">LIVE</button>
+    <button class="side-tab" data-view="radar">RADAR<span class="badge-n" id="radar-badge"></span></button>
+    <button class="side-tab" data-view="opps">OPPS<span class="badge-n" id="opps-badge"></span></button>
+    <button class="side-tab" data-view="tune">TUNE</button>
+  </div>
+
+  <div class="side-view active" id="view-live">
+    <section class="panel" id="flow-panel">
+      <div class="panel-h">On-chain flow · session</div>
+      <div id="flow">
+        <div class="delta-line"><b id="flow-delta">—</b><span id="flow-note">net taker delta</span></div>
+        <div class="split-bar"><div class="b" id="flow-bar-b" style="width:50%"></div><div class="s" id="flow-bar-s" style="width:50%"></div></div>
+        <div class="split-lbl"><span class="bb" id="flow-buy">BUY —</span><span class="ss" id="flow-sell">SELL —</span></div>
+        <div class="chips">
+          <span class="chip" style="color:#f97316">LIQ <b id="f-liq">$0</b></span>
+          <span class="chip" style="color:#ef4444">STOP <b id="f-stop">$0</b></span>
+          <span class="chip" style="color:#22c55e">TP <b id="f-tp">$0</b></span>
+          <span class="chip" style="color:#a78bfa">HEDGE <b id="f-hedge">$0</b></span>
+          <span class="chip" id="f-prints">0 prints</span>
+        </div>
       </div>
+    </section>
+
+    <section class="panel" style="min-height:0">
+      <div class="panel-h">Liquidations<span class="livechip" id="liq-count"></span></div>
+      <div id="liq-feed"></div>
+    </section>
+
+    <section class="panel" style="min-height:0">
+      <div class="panel-h">On-chain tape<span class="livechip" id="tape-note">who is trading</span></div>
+      <div id="tape-scroll"></div>
+    </section>
+
+    <section class="panel" style="min-height:0">
+      <div class="panel-h">Traders · 60m<span class="livechip" id="traders-note">winners &amp; losers</span></div>
+      <div id="traders-scroll"></div>
+    </section>
+  </div>
+
+  <div class="side-view" id="view-radar">
+    <div id="radar-head">
+      <div class="big" id="radar-px">—</div>
+      <div class="sub" id="radar-oh">arming…</div>
     </div>
-  </section>
+    <section class="panel" style="min-height:0">
+      <div class="panel-h">Magnet levels<span class="livechip">estimated forced-flow pockets</span></div>
+      <div id="radar-levels"></div>
+    </section>
+    <section class="panel" style="min-height:0">
+      <div class="panel-h">Cascades · last_cascade<span class="livechip" id="cascade-count"></span></div>
+      <div id="cascade-feed"></div>
+    </section>
+  </div>
 
-  <section class="panel" style="min-height:0">
-    <div class="panel-h">Liquidations<span class="livechip" id="liq-count"></span></div>
-    <div id="liq-feed"></div>
-  </section>
+  <div class="side-view" id="view-opps">
+    <section class="panel" style="min-height:0">
+      <div class="panel-h">Opportunities<span class="livechip" id="opps-note">live setups from detected events</span></div>
+      <div id="opps-scroll"><div class="warm" style="position:static;padding:30px 0">scanning markets…</div></div>
+    </section>
+  </div>
 
-  <section class="panel" style="min-height:0">
-    <div class="panel-h">On-chain tape<span class="livechip" id="tape-note">who is trading</span></div>
-    <div id="tape-scroll"></div>
-  </section>
-
-  <section class="panel" style="min-height:0">
-    <div class="panel-h">Traders · 60m<span class="livechip" id="traders-note">winners &amp; losers</span></div>
-    <div id="traders-scroll"></div>
-  </section>
+  <div class="side-view" id="view-tune">
+    <section class="panel" style="min-height:0">
+      <div class="panel-h">Tuning<span class="livechip" id="tune-note">live engine params</span></div>
+      <div id="tune-scroll"></div>
+    </section>
+  </div>
 </aside>
 
 <footer>

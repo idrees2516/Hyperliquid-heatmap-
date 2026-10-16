@@ -182,6 +182,127 @@ pub async fn run_traders_push(state: Arc<AppState>) {
     }
 }
 
+/// Push radar snapshots for coins clients watch + finalize/decay levels.
+pub async fn run_radar_push(state: Arc<AppState>) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(3));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut decay = tokio::time::interval(Duration::from_secs(30));
+    decay.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                let now = now_ms();
+                let params = state.tuning.get();
+                let coins: Vec<String> = {
+                    let cs = state.coins.read().unwrap();
+                    cs.iter()
+                        .filter(|(_, c)| c.inner.lock().unwrap().sub_refcount > 0)
+                        .map(|(k, _)| k.clone())
+                        .collect()
+                };
+                for coin in coins {
+                    if let Some(r) = state.get_radar(&coin) {
+                        let snap = r.lock().unwrap().snapshot(&params, now);
+                        let _ = state.broadcast.send(crate::engine::EngineEvent::Radar {
+                            coin: coin.clone(),
+                            snapshot: snap,
+                        });
+                        // pick up cascades finalized between trades
+                        let drained: Vec<shared::CascadeRecord> = {
+                            let mut g = r.lock().unwrap();
+                            std::mem::take(&mut g.new_cascades).into_iter().collect()
+                        };
+                        for rec in drained {
+                            state.push_cascade(rec);
+                        }
+                    }
+                }
+            }
+            _ = decay.tick() => {
+                let now = now_ms();
+                let params = state.tuning.get();
+                let radars: Vec<_> = state.radar.read().unwrap().values().cloned().collect();
+                for r in radars {
+                    let mut g = r.lock().unwrap();
+                    let coin = g.coin.clone();
+                    g.decay(now, &params);
+                    let drained: Vec<shared::CascadeRecord> =
+                        std::mem::take(&mut g.new_cascades).into_iter().collect();
+                    drop(g);
+                    for rec in drained {
+                        state.push_cascade(rec);
+                    }
+                    let _ = coin;
+                }
+            }
+        }
+    }
+}
+
+/// Scan for actionable opportunities and broadcast them.
+pub async fn run_opps_push(state: Arc<AppState>) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(5));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        let opps = crate::engine::opps::build_opps(&state);
+        let _ = state
+            .broadcast
+            .send(crate::engine::EngineEvent::Opps(opps));
+    }
+}
+
+/// Persist radar levels + cascade history (overhang survives restarts).
+pub async fn run_persist(state: Arc<AppState>) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(15));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        // radar file
+        let mut map = std::collections::HashMap::new();
+        {
+            let radars: Vec<_> = state.radar.read().unwrap().values().cloned().collect();
+            for r in radars {
+                let g = r.lock().unwrap();
+                if g.dirty || !g.levels.is_empty() {
+                    map.insert(g.coin.clone(), g.to_persist());
+                }
+            }
+        }
+        state.persist.save_radar(&map);
+        // cascade file
+        {
+            let q = state.cascades.lock().unwrap();
+            state.persist.save_cascades(&q);
+        }
+        // tuning file
+        state.tuning.save_if_dirty();
+    }
+}
+
+/// Graceful shutdown: flush everything to disk before exiting.
+pub async fn run_shutdown_flush(state: Arc<AppState>) {
+    if tokio::signal::ctrl_c().await.is_ok() {
+        tracing::info!("ctrl-c: flushing radar/cascades/tuning to disk");
+        let mut map = std::collections::HashMap::new();
+        {
+            let radars: Vec<_> = state.radar.read().unwrap().values().cloned().collect();
+            for r in radars {
+                let mut g = r.lock().unwrap();
+                g.finalize_all();
+                map.insert(g.coin.clone(), g.to_persist());
+            }
+        }
+        state.persist.save_radar(&map);
+        {
+            let q = state.cascades.lock().unwrap();
+            state.persist.save_cascades(&q);
+        }
+        state.tuning.save_if_dirty();
+        std::process::exit(0);
+    }
+}
+
 /// Keep a small map of well-known labels (auto MM detection is behavioral).
 pub fn known_labels() -> HashMap<String, String> {
     // Intentionally empty: labels are detected behaviorally (MM detection) or
