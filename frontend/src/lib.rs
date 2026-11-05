@@ -1457,7 +1457,11 @@ pub fn start() {
                                 bv.show_dom = !on;
                                 bv.invalidate();
                             }
-                            "radar" => bv.show_radar = !on,
+                            "radar" => {
+                                bv.show_radar = !on;
+                                bv.invalidate();
+                            }
+                            "vwap" => bv.show_vwap = !on,
                             "delta" => {
                                 bv.show_delta = !on;
                                 bv.invalidate();
@@ -1470,6 +1474,31 @@ pub fn start() {
                     .unwrap();
                 oncl.forget();
             }
+        }
+
+        // Recenter: back to the live edge (default zoom, auto price, neutral heat)
+        {
+            let btn = el::<web_sys::HtmlElement>("bt-recenter");
+            let onc = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+                BOOK.with(|b| b.borrow_mut().recenter());
+                let slider = el::<web_sys::HtmlInputElement>("bt-intensity");
+                slider.set_value("0");
+                // restore the ~12m range preset as active
+                let all = doc().get_elements_by_class_name("bt-btn");
+                for j in 0..all.length() {
+                    if let Some(x) = all.item(j) {
+                        if let Some(c) = x.get_attribute("data-cols") {
+                            let _ = x.set_attribute(
+                                "class",
+                                if c == "1800" { "bt-btn active" } else { "bt-btn" },
+                            );
+                        }
+                    }
+                }
+            });
+            btn.add_event_listener_with_callback("click", onc.as_ref().unchecked_ref())
+                .unwrap();
+            onc.forget();
         }
     }
 

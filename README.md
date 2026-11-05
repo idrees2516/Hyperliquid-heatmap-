@@ -8,7 +8,7 @@
 
 Onchain Footprint is a realtime order-flow terminal that lets you **look inside every candle across all Hyperliquid perpetuals**. Every trade on Hyperliquid is fully on-chain and attributed to wallets, so the footprint shows *who* is buying and selling, *why* (intent), and *whether those traders are winners or losers*.
 
-- **Bookmap terminal** — a full liquidity-map terminal (`BOOK` tab): live L2 **heatmap** of resting orders (blue → white → yellow → red on a log size scale, one column per book snapshot), **trade bubbles** (teal buys / red sells, sized by $), **gold liquidation diamonds**, the live **DOM ladder** with depth bars, a cumulative **depth chart**, a **volume profile** with POC/VAH/VAL, a **Δ/CVD strip**, and the radar's magnet levels drawn straight onto the map.
+- **Bookmap terminal** — a full liquidity-map terminal (`BOOK` tab): live L2 **heatmap** of resting orders (reference ramp `navy → blue → cyan → white → yellow → orange → red` on a log size scale, one column per book snapshot), a **pink price path** with candle-close countdown, dashed **VWAP ±1σ bands**, **trade bubbles** (teal buys / red sells, whale prints venue-tagged `HL`), **gold liquidation diamonds**, a **LIQ LEVELS rail** (green long / red short liquidation levels with LEVEL MAX / CUM MAX), the live **DOM ladder** with depth bars, a cumulative **depth chart**, a **volume profile** with POC/VAH/VAL, a **Δ/CVD strip**, and the radar's magnet levels drawn straight onto the map.
 - **Footprint chart** — per price level inside every candle: taker **SELL × BUY** notional (USD), heat-mapped, with the point-of-control outlined and a per-window delta strip.
 - **Who is trading** — every print carries the **taker and maker wallet** (link straight to Hypurrscan). A 60-minute trader leaderboard ranks wallets by flow with per-wallet buy/sell split and market share.
 - **Intent behind each trade** — fills are classified live as `AGGR` (aggressive open/increase), `LIQ` (liquidation), `DELEV` (deleveraging), `STOP` (realized-loss reduce), `TP` (realized-profit reduce), `HEDGE` (cross-market delta-neutral leg) or `REDUCE`.
@@ -34,27 +34,45 @@ Five sidebar views:
 
 ### The bookmap terminal (`BOOK` tab)
 
-A bookmap-style liquidity terminal rendered on one canvas:
+A bookmap-style liquidity terminal rendered on one canvas, styled after the
+reference liquidity-map screenshots (blue/red resting orders, pink price
+path, LIQ LEVELS rail):
 
 - **Heatmap** — every column is a full L2 book snapshot. Colour encodes resting
-  size on a log scale from the 15th→96th percentile of visible levels
-  (thin `blue` → heavy `white` → walls `yellow`/`red`). The **HEAT** slider
-  slides the colour window along the size axis (left = only the biggest
-  walls, right = lighter liquidity lights up); double-click resets.
+  size on a log scale from the 15th→94th percentile of visible levels using
+  the reference ramp `navy → blue → cyan → white → yellow → orange → red`
+  (thin `blue` resting orders → walls `red`); the zero colour equals the pane
+  background. The **HEAT** slider slides the colour window along the size
+  axis (left = only the biggest walls, right = lighter liquidity lights up);
+  double-click resets.
+- **Price path** — the traded price traces a **pink** line across the heat
+  (with a dark casing so it reads over bright walls); the axis carries the
+  last-price tag plus an **m:ss candle-close countdown** beneath it.
+- **Session VWAP** — dashed pink **VWAP ±1σ bands** computed as a running
+  USD-weighted mean/variance over the visible prints (toolbar: `VWAP`).
 - **Trade bubbles** — every print lands on the map: teal = market buy, red =
-  market sell, radius by USD. `LIQ`/`DELEV` prints render as **gold diamonds**
-  with a glow and a size label.
+  market sell, radius by USD; whale prints carry the venue tag **`HL`**.
+  `LIQ`/`DELEV` prints render as **gold diamonds** with a glow and an
+  `HL <size>` label; standalone liquidation events draw gold `HL` rings.
+- **LIQ LEVELS rail** — a right-hand panel in the reference style: estimated
+  forced-flow per price row as **green long / red short bars** with
+  `LEVEL MAX` / `CUM MAX` stats per side, a `price` tick and a `±8%` domain
+  note. The panel maps its own wider price domain so the full liquidation
+  landscape stays visible even when the chart is zoomed tight on the heat.
 - **DOM ladder** — the live book: worst→best asks (red bars) above the
   spread row, best→worst bids (teal bars) below, sizes in USD, wall rows
   outlined.
 - **Depth chart** — cumulative bid/ask curves ±1.2% around mid.
 - **Volume profile** — buy/sell histogram of the visible window with
-  **POC** and the 70% value area (**VAH/VAL**).
+  **POC** and the 70% value area (**VAH/VAL**) on dark backing chips.
 - **Δ/CVD strip** — per-minute taker delta bars with the cumulative-delta line.
 - **Radar overlay** — armed/engaged magnet levels as dashed lines with
   estimated forced-flow labels.
 - **Interaction** — scroll to zoom time, hover for a price/time/level-size
-  readout, toolbar toggles for every panel, range presets ~3m…~45m.
+  readout, toolbar toggles for every panel, range presets ~3m…~45m, and
+  **RECENTER** to jump back to the live edge (default zoom, auto price fit,
+  neutral heat). A pulsing **`live trades`** chip marks the streaming print
+  feed at the bottom-right of the heat.
 
 Book data pipeline: the coin you watch is subscribed to Hyperliquid's
 `l2Book` WS channel *and* polled over REST (~2 Hz) to densify the map (the

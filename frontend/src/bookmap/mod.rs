@@ -31,23 +31,25 @@ fn time_label(t: i64, step_ms: f64) -> String {
 // colour ramp (log-normalized resting size → bookmap heat)
 // ---------------------------------------------------------------------------
 
+/// reference-terminal ramp (dark): navy -> blue -> cyan -> white ->
+/// yellow -> orange -> red; the zero colour equals the pane background.
 const RAMP: [&str; 16] = [
-    "#0a101e",
-    "#0f2252",
-    "#12347a",
-    "#1545a1",
-    "#1d5dc4",
-    "#2877e6",
-    "#4599f8",
-    "#6ebefe",
-    "#b6e2ff",
-    "#eae9bb",
-    "#ffd467",
-    "#ffaf42",
-    "#ff8c27",
-    "#ff6b22",
-    "#ff4b1d",
-    "#ff2a18",
+    "#050f1f",
+    "#071c35",
+    "#08294a",
+    "#0a3660",
+    "#0c4979",
+    "#105e94",
+    "#1373b0",
+    "#3090c7",
+    "#57b0db",
+    "#7fd0f0",
+    "#cdedfa",
+    "#f8f2c3",
+    "#ffe14a",
+    "#ffa719",
+    "#f76909",
+    "#e8281c",
 ];
 
 fn ramp(v: f64) -> &'static str {
@@ -55,14 +57,17 @@ fn ramp(v: f64) -> &'static str {
     RAMP[i]
 }
 
-const BG: &str = "#04070c";
-const GRID: &str = "#0d1420";
+const BG: &str = "#050f1f";
+const GRID: &str = "#0b1a30";
 const C_DIM: &str = "#5b6b80";
 const C_TXT: &str = "#c9d6e4";
 const BUY: &str = "#1fe3a6";
 const SELL: &str = "#ff4d6a";
 const LIQ: &str = "#ffd24a";
 const C_VA: &str = "#e879f9";
+/// price-path line + session VWAP (screenshot pink)
+const PINK: &str = "#ff4fd0";
+const VWAP: &str = "#ff8fe0";
 
 const FONT: &str = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
 const FONT_B: &str = "bold 10px ui-monospace, SFMono-Regular, Menlo, monospace";
@@ -93,6 +98,7 @@ pub struct BookView {
     pub show_dom: bool,
     pub show_radar: bool,
     pub show_delta: bool,
+    pub show_vwap: bool,
     pub hover: Option<(f64, f64)>,
     pub px_lo: f64,
     pub px_hi: f64,
@@ -119,6 +125,7 @@ impl Default for BookView {
             show_dom: true,
             show_radar: true,
             show_delta: true,
+            show_vwap: true,
             hover: None,
             px_lo: 0.0,
             px_hi: 0.0,
@@ -184,6 +191,15 @@ impl BookView {
 
     /// drop the heatmap cache (forces a full redraw)
     pub fn invalidate(&mut self) {
+        self.heat = None;
+    }
+
+    /// back to the live edge: default zoom, auto price fit, neutral heat
+    pub fn recenter(&mut self) {
+        self.vis_cols = 1_800;
+        self.px_lo = 0.0;
+        self.px_hi = 0.0;
+        self.intensity = 0.0;
         self.heat = None;
     }
 
@@ -261,10 +277,12 @@ struct Lay {
     y: f64,
     w: f64,
     h: f64,
-    axis_x: f64,
-    axis_w: f64,
+    liq_x: f64,
+    liq_w: f64,
     prof_x: f64,
     prof_w: f64,
+    axis_x: f64,
+    axis_w: f64,
     dom_x: f64,
     dom_w: f64,
     delta_y: f64,
@@ -366,10 +384,11 @@ pub fn draw(
     let time_h = 18.0;
     let delta_h = if bv.show_delta { 54.0 } else { 0.0 };
     let axis_w = 62.0;
+    let liq_w = if bv.show_radar { 78.0 } else { 0.0 };
     let prof_w = if bv.show_profile { 86.0 } else { 0.0 };
     let dom_w = if bv.show_dom { (cw * 0.19).clamp(170.0, 300.0) } else { 0.0 };
     let plot_x = 0.0;
-    let plot_w = (cw - axis_w - prof_w - dom_w - 4.0).max(120.0);
+    let plot_w = (cw - liq_w - prof_w - axis_w - dom_w - 4.0).max(120.0);
     let plot_y = top_h;
     let plot_h = (ch - top_h - time_h - delta_h - 4.0).max(80.0);
     let lay = Lay {
@@ -377,11 +396,13 @@ pub fn draw(
         y: plot_y,
         w: plot_w,
         h: plot_h,
-        axis_x: plot_x + plot_w,
-        axis_w,
-        prof_x: plot_x + plot_w + axis_w,
+        liq_x: plot_x + plot_w,
+        liq_w,
+        prof_x: plot_x + plot_w + liq_w,
         prof_w,
-        dom_x: plot_x + plot_w + axis_w + prof_w,
+        axis_x: plot_x + plot_w + liq_w + prof_w,
+        axis_w,
+        dom_x: plot_x + plot_w + liq_w + prof_w + axis_w,
         dom_w,
         delta_y: plot_y + plot_h + 4.0,
         delta_h,
@@ -431,6 +452,10 @@ pub fn draw(
             hi = hi.max(t.px);
         }
     }
+    // (no chart-range widening for magnet levels: the blue/red heat is the
+    // hero and must fill the plot; the LIQ LEVELS panel shows the full
+    // liquidation landscape on its own wider ±8% domain, and the radar
+    // overlay still dashes any level that falls inside the traded range)
     if lo == f64::MAX || hi == f64::MIN || hi <= lo {
         let m = bv.cols[n - 1].mid();
         lo = m * 0.99;
@@ -490,7 +515,7 @@ pub fn draw(
                 samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let pick = |q: f64| samples[((samples.len() as f64 - 1.0) * q) as usize].max(1.0);
                 wlo = pick(0.15);
-                whi = pick(0.96).max(wlo * 1.6);
+                whi = pick(0.94).max(wlo * 1.6);
             } else {
                 wlo = 2_000.0;
                 whi = 400_000.0;
@@ -567,6 +592,11 @@ pub fn draw(
     // ----- grid + axes ------------------------------------------------------
     draw_grid_and_axes(&ctx, &lay, px_lo, px_hi, &bv.cols, skip, vis_n, col_w);
 
+    // ----- session VWAP with bands (screenshot pink) ------------------------
+    if bv.show_vwap {
+        draw_vwap(&ctx, &lay, &trades_all, first_t, &p2y, &t2x);
+    }
+
     // ----- radar magnet levels ----------------------------------------------
     if bv.show_radar {
         if let Some(rs) = radar {
@@ -598,8 +628,21 @@ pub fn draw(
             pts.push((last_x, p2y(last_px)));
         }
         if pts.len() >= 2 {
-            ctx.set_stroke_style_str("#f4f7fb");
-            ctx.set_line_width(1.4);
+            // dark casing under the pink path so it reads over bright heat
+            ctx.set_line_join("round");
+            ctx.set_stroke_style_str("rgba(5,10,20,0.6)");
+            ctx.set_line_width(3.4);
+            ctx.begin_path();
+            for (i, (x, y)) in pts.iter().enumerate() {
+                if i == 0 {
+                    ctx.move_to(*x, *y);
+                } else {
+                    ctx.line_to(*x, *y);
+                }
+            }
+            ctx.stroke();
+            ctx.set_stroke_style_str(PINK);
+            ctx.set_line_width(1.5);
             ctx.begin_path();
             for (i, (x, y)) in pts.iter().enumerate() {
                 if i == 0 {
@@ -626,6 +669,22 @@ pub fn draw(
         ctx.set_font(FONT_B);
         ctx.set_text_align("center");
         let _ = ctx.fill_text(&fmt_px(last_px_seen), lay.axis_x + lay.axis_w / 2.0, y + 3.5);
+        ctx.set_text_align("left");
+        // candle-close countdown under the tag (next 1m boundary);
+        // flips above the tag when the tag sits near the plot bottom
+        let rem_ms = 60_000 - (js_sys::Date::now() as i64).rem_euclid(60_000);
+        let cd = format!("{}:{:02}", rem_ms / 60_000, (rem_ms % 60_000) / 1_000);
+        let below = y + 22.0 <= lay.y + lay.h;
+        let cy = if below { y + 8.0 } else { y - 21.0 };
+        ctx.set_fill_style_str("rgba(8,16,28,0.94)");
+        ctx.fill_rect(lay.axis_x + 2.0, cy, lay.axis_w - 4.0, 13.0);
+        ctx.set_stroke_style_str("rgba(30,48,70,0.8)");
+        ctx.set_line_width(1.0);
+        ctx.stroke_rect(lay.axis_x + 2.0, cy, lay.axis_w - 4.0, 13.0);
+        ctx.set_fill_style_str(if up { "#9defd4" } else { "#ffb3c0" });
+        ctx.set_font(FONT);
+        ctx.set_text_align("center");
+        let _ = ctx.fill_text(&cd, lay.axis_x + lay.axis_w / 2.0, cy + 9.5);
         ctx.set_text_align("left");
     }
 
@@ -660,6 +719,8 @@ pub fn draw(
                 continue;
             }
             let r = (1.6 + 7.0 * (t.usd / p95).sqrt()).clamp(1.8, 16.0);
+            // whale prints carry the venue tag (screenshot bubbles)
+            let tagged = t.usd >= (p95 * 1.25).max(50_000.0);
             if is_liq {
                 // gold diamond with glow
                 ctx.set_fill_style_str("rgba(255,210,74,0.22)");
@@ -677,21 +738,29 @@ pub fn draw(
                 if t.usd >= 100_000.0 {
                     ctx.set_fill_style_str(LIQ);
                     ctx.set_font(FONT_B);
-                    let _ = ctx.fill_text(&fmt_k(t.usd), x + r + 3.0, y + 3.0);
+                    let _ = ctx.fill_text(&format!("HL {}", fmt_k(t.usd)), x + r + 3.0, y + 3.0);
                 }
             } else {
                 let buy = t.side.is_buy();
+                let rr = if tagged { r.max(9.5) } else { r };
                 ctx.set_fill_style_str(if buy {
-                    "rgba(31,227,166,0.42)"
+                    "rgba(31,227,166,0.55)"
                 } else {
-                    "rgba(255,77,106,0.42)"
+                    "rgba(255,77,106,0.55)"
                 });
                 ctx.begin_path();
-                let _ = ctx.arc(x, y, r, 0.0, std::f64::consts::TAU);
+                let _ = ctx.arc(x, y, rr, 0.0, std::f64::consts::TAU);
                 let _ = ctx.fill();
                 ctx.set_stroke_style_str(if buy { BUY } else { SELL });
                 ctx.set_line_width(1.0);
                 ctx.stroke();
+                if tagged {
+                    ctx.set_fill_style_str("#ffffff");
+                    ctx.set_font("bold 9px ui-monospace, SFMono-Regular, Menlo, monospace");
+                    ctx.set_text_align("center");
+                    let _ = ctx.fill_text("HL", x, y + 3.0);
+                    ctx.set_text_align("left");
+                }
             }
         }
         // standalone liquidation events (not tied to a print)
@@ -711,6 +780,11 @@ pub fn draw(
                 ctx.begin_path();
                 let _ = ctx.arc(x, y, 14.0, 0.0, std::f64::consts::TAU);
                 ctx.stroke();
+                ctx.set_fill_style_str(LIQ);
+                ctx.set_font(FONT_B);
+                ctx.set_text_align("center");
+                let _ = ctx.fill_text("HL", x, y + 3.0);
+                ctx.set_text_align("left");
             }
         }
     }
@@ -718,6 +792,15 @@ pub fn draw(
     // ----- volume profile -----------------------------------------------------
     if bv.show_profile && lay.prof_w > 8.0 {
         draw_profile(&ctx, &lay, &trades_all, first_t, px_lo, px_hi, &p2y);
+    }
+
+    // ----- LIQ LEVELS panel (green long / red short liquidation levels) ------
+    if bv.show_radar && lay.liq_w > 8.0 {
+        if let Some(rs) = radar {
+            if rs.coin == bv.coin {
+                draw_liq_levels(&ctx, &lay, rs);
+            }
+        }
     }
 
     // ----- DOM ladder + depth --------------------------------------------------
@@ -772,6 +855,21 @@ pub fn draw(
             ctx.set_font(FONT);
             let _ = ctx.fill_text(&txt, bx + 6.0, by + 11.5);
         }
+    }
+
+    // ----- live-trades chip (bottom-right of the heat, clear of the panels) ----
+    {
+        let pulse = 0.5 + 0.5 * ((js_sys::Date::now() / 700.0).sin());
+        let cx = lay.x + lay.w - 62.0;
+        let cy = lay.y + lay.h - 12.0;
+        ctx.set_fill_style_str(&format!("rgba(52,240,160,{:.2})", 0.35 + 0.6 * pulse));
+        ctx.begin_path();
+        let _ = ctx.arc(cx, cy, 3.0, 0.0, std::f64::consts::TAU);
+        let _ = ctx.fill();
+        ctx.set_fill_style_str("rgba(205,225,240,0.85)");
+        ctx.set_font("9px ui-monospace, SFMono-Regular, Menlo, monospace");
+        ctx.set_text_align("left");
+        let _ = ctx.fill_text("live trades", cx + 7.0, cy + 3.0);
     }
 
     draw_status(&ctx, bv, cw, first_t, vis_n);
@@ -904,12 +1002,16 @@ fn draw_grid_and_axes(
     // panel separators
     ctx.set_stroke_style_str("#141d2a");
     ctx.begin_path();
-    ctx.move_to(lay.axis_x + 0.5, lay.y);
-    ctx.line_to(lay.axis_x + 0.5, lay.y + lay.h);
+    if lay.liq_w > 0.0 {
+        ctx.move_to(lay.liq_x + 0.5, lay.y);
+        ctx.line_to(lay.liq_x + 0.5, lay.y + lay.h);
+    }
     if lay.prof_w > 0.0 {
         ctx.move_to(lay.prof_x + 0.5, lay.y);
         ctx.line_to(lay.prof_x + 0.5, lay.y + lay.h);
     }
+    ctx.move_to(lay.axis_x + 0.5, lay.y);
+    ctx.line_to(lay.axis_x + 0.5, lay.y + lay.h);
     if lay.dom_w > 0.0 {
         ctx.move_to(lay.dom_x + 0.5, lay.y);
         ctx.line_to(lay.dom_x + 0.5, lay.y + lay.h);
@@ -919,6 +1021,80 @@ fn draw_grid_and_axes(
         ctx.line_to(lay.x + lay.w, lay.delta_y + 0.5);
     }
     ctx.stroke();
+}
+
+/// Session VWAP with ±1σ bands (pink, like the reference screenshots):
+/// running USD-weighted mean and variance over the visible prints.
+fn draw_vwap(
+    ctx: &CanvasRenderingContext2d,
+    lay: &Lay,
+    trades: &[&LiveTrade],
+    first_t: i64,
+    p2y: &dyn Fn(f64) -> f64,
+    t2x: &dyn Fn(i64) -> f64,
+) {
+    let _ = lay;
+    let mut sum_w = 0.0_f64;
+    let mut sum_wp = 0.0_f64;
+    let mut sum_wp2 = 0.0_f64;
+    // (x, vwap_y, +σ_y, -σ_y)
+    let mut band: Vec<(f64, f64, f64, f64)> = Vec::new();
+    let mut last_x = -2.0_f64;
+    for t in trades.iter() {
+        if t.t < first_t || t.px <= 0.0 || t.usd <= 0.0 {
+            continue;
+        }
+        sum_w += t.usd;
+        sum_wp += t.usd * t.px;
+        sum_wp2 += t.usd * t.px * t.px;
+        if sum_w <= 0.0 {
+            continue;
+        }
+        let vwap = sum_wp / sum_w;
+        let var = (sum_wp2 / sum_w - vwap * vwap).max(0.0);
+        let sig = var.sqrt();
+        let x = t2x(t.t);
+        if x - last_x >= 2.0 {
+            band.push((x, p2y(vwap), p2y(vwap + sig), p2y(vwap - sig)));
+            last_x = x;
+        }
+    }
+    if band.len() < 2 {
+        return;
+    }
+    // band fill
+    ctx.set_fill_style_str("rgba(255,79,208,0.14)");
+    ctx.begin_path();
+    let (x0, _, up0, _) = band[0];
+    ctx.move_to(x0, up0);
+    for (x, _, up, _) in band.iter() {
+        ctx.line_to(*x, *up);
+    }
+    for (x, _, _, dn) in band.iter().rev() {
+        ctx.line_to(*x, *dn);
+    }
+    ctx.close_path();
+    let _ = ctx.fill();
+    // vwap line
+    ctx.set_stroke_style_str(VWAP);
+    ctx.set_line_width(1.4);
+    dash(ctx, true, 5.0, 4.0);
+    ctx.begin_path();
+    let (x0, v0, _, _) = band[0];
+    ctx.move_to(x0, v0);
+    for (x, v, _, _) in band.iter() {
+        ctx.line_to(*x, *v);
+    }
+    ctx.stroke();
+    dash(ctx, false, 0.0, 0.0);
+    // right-edge label
+    let (lx, _, lv, _) = *band.last().unwrap();
+    ctx.set_font(FONT_B);
+    ctx.set_fill_style_str(VWAP);
+    ctx.set_text_align("right");
+    let _ = ctx.fill_text("VWAP", lx - 3.0, lv - 4.0);
+    ctx.set_text_align("left");
+    ctx.set_font(FONT);
 }
 
 fn draw_radar(
@@ -967,6 +1143,120 @@ fn draw_radar(
         ctx.set_fill_style_str(col);
         let _ = ctx.fill_text(&lbl, lay.x + 8.0, y + 3.5);
     }
+}
+
+/// Right-hand LIQ LEVELS panel: horizontal bars of estimated forced-flow
+/// per price row — green = long liquidations, red = short liquidations —
+/// with LEVEL MAX / CUM MAX stats, like the reference screenshots.
+/// The panel maps its own wider price domain (levels within ±8% of the
+/// last price) so the full liquidation landscape stays visible even when
+/// the chart itself is zoomed tight around the traded range.
+fn draw_liq_levels(
+    ctx: &CanvasRenderingContext2d,
+    lay: &Lay,
+    rs: &shared::RadarSnapshot,
+) {
+    let x0 = lay.liq_x + 3.0;
+    let w_in = lay.liq_w - 6.0;
+    // header block (title + LEVEL MAX / CUM MAX per side)
+    let hdr_h = 64.0;
+    ctx.set_fill_style_str("rgba(4,10,20,0.72)");
+    ctx.fill_rect(lay.liq_x, lay.y, lay.liq_w, lay.h);
+    ctx.set_font("bold 9px ui-monospace, SFMono-Regular, Menlo, monospace");
+    ctx.set_fill_style_str("#8fb7d4");
+    ctx.set_text_align("left");
+    let _ = ctx.fill_text("LIQ LEVELS", x0, lay.y + 12.0);
+
+    let mid = if rs.px > 0.0 { rs.px } else { return };
+    // own domain: levels within ±8% of price, always containing the price
+    let mut dom_lo = mid * 0.992;
+    let mut dom_hi = mid * 1.008;
+    for lv in rs.levels.iter() {
+        if lv.est_usd < 10_000.0 || (lv.px - mid).abs() / mid > 0.08 {
+            continue;
+        }
+        dom_lo = dom_lo.min(lv.px);
+        dom_hi = dom_hi.max(lv.px);
+    }
+    let span = (dom_hi - dom_lo).max(1e-9);
+    let body_y = lay.y + hdr_h;
+    let body_h = (lay.h - hdr_h - 14.0).max(20.0);
+    let rows = ((body_h / 3.0) as usize).clamp(16, 220);
+    let row_h = body_h / rows as f64;
+    let mut long_rows = vec![0.0_f64; rows];
+    let mut short_rows = vec![0.0_f64; rows];
+    for lv in rs.levels.iter() {
+        if lv.est_usd < 10_000.0 || lv.px < dom_lo || lv.px > dom_hi {
+            continue;
+        }
+        let r = (((dom_hi - lv.px) / span) * rows as f64) as usize;
+        if r < rows {
+            if lv.long {
+                long_rows[r] += lv.est_usd;
+            } else {
+                short_rows[r] += lv.est_usd;
+            }
+        }
+    }
+    let max_l = long_rows.iter().cloned().fold(0.0_f64, f64::max);
+    let max_s = short_rows.iter().cloned().fold(0.0_f64, f64::max);
+    let cum_l: f64 = long_rows.iter().sum();
+    let cum_s: f64 = short_rows.iter().sum();
+
+    // stats: two lines per side (LEVEL MAX + CUM MAX), green then red
+    ctx.set_font("8px ui-monospace, SFMono-Regular, Menlo, monospace");
+    ctx.set_fill_style_str("#34f0a0");
+    let _ = ctx.fill_text(&format!("LEVEL MAX {}", fmt_k(max_l)), x0, lay.y + 23.0);
+    let _ = ctx.fill_text(&format!("CUM MAX {}", fmt_k(cum_l)), x0, lay.y + 32.0);
+    ctx.set_fill_style_str("#ff5c72");
+    let _ = ctx.fill_text(&format!("LEVEL MAX {}", fmt_k(max_s)), x0, lay.y + 43.0);
+    let _ = ctx.fill_text(&format!("CUM MAX {}", fmt_k(cum_s)), x0, lay.y + 52.0);
+    // side markers + header separator
+    ctx.set_fill_style_str("rgba(46,224,150,0.9)");
+    ctx.fill_rect(x0, lay.y + 58.0, 5.0, 3.0);
+    ctx.set_fill_style_str("rgba(255,77,96,0.9)");
+    ctx.fill_rect(x0 + w_in - 5.0, lay.y + 58.0, 5.0, 3.0);
+    ctx.set_stroke_style_str("#1a2942");
+    ctx.set_line_width(1.0);
+    ctx.begin_path();
+    ctx.move_to(lay.liq_x, body_y - 4.5);
+    ctx.line_to(lay.liq_x + lay.liq_w, body_y - 4.5);
+    ctx.stroke();
+
+    // bars: longs grow right from the left edge, shorts from the right edge
+    for r in 0..rows {
+        let y = body_y + r as f64 * row_h;
+        if long_rows[r] > 0.0 && max_l > 0.0 {
+            let bw = (long_rows[r] / max_l * (w_in * 0.5)).max(1.0);
+            ctx.set_fill_style_str("rgba(46,224,150,0.85)");
+            ctx.fill_rect(x0, y, bw, row_h.max(1.4));
+        }
+        if short_rows[r] > 0.0 && max_s > 0.0 {
+            let bw = (short_rows[r] / max_s * (w_in * 0.5)).max(1.0);
+            ctx.set_fill_style_str("rgba(255,77,96,0.85)");
+            ctx.fill_rect(x0 + w_in - bw, y, bw, row_h.max(1.4));
+        }
+    }
+    // current-price tick across the panel (orients longs below / shorts above)
+    let py = body_y + ((dom_hi - mid) / span * body_h).clamp(4.0, body_h - 4.0);
+    ctx.set_stroke_style_str("rgba(125,211,252,0.75)");
+    ctx.set_line_width(1.0);
+    ctx.begin_path();
+    ctx.move_to(lay.liq_x + 1.0, py);
+    ctx.line_to(lay.liq_x + lay.liq_w - 1.0, py);
+    ctx.stroke();
+    ctx.set_fill_style_str("#7dd3fc");
+    ctx.set_font("7.5px ui-monospace, SFMono-Regular, Menlo, monospace");
+    let _ = ctx.fill_text("price", lay.liq_x + 3.0, py - 2.5);
+    // domain note at the bottom
+    ctx.set_fill_style_str("rgba(91,107,128,0.9)");
+    ctx.set_font("7.5px ui-monospace, SFMono-Regular, Menlo, monospace");
+    let _ = ctx.fill_text(
+        &format!("±8% {}–{}", fmt_k(dom_lo), fmt_k(dom_hi)),
+        x0,
+        lay.y + lay.h - 4.0,
+    );
+    ctx.set_font(FONT);
 }
 
 fn draw_profile(
@@ -1073,8 +1363,12 @@ fn draw_profile(
             ctx.line_to(lay.prof_x + lay.prof_w, ly);
             ctx.stroke();
             dash(ctx, false, 0.0, 0.0);
+            // backing box so guide lines never strike through the text
+            let bw = txt.len() as f64 * 5.9 + 5.0;
+            ctx.set_fill_style_str("rgba(4,10,20,0.88)");
+            ctx.fill_rect(lay.prof_x + 1.0, ty - 8.5, bw, 11.0);
             ctx.set_fill_style_str(col);
-            let _ = ctx.fill_text(&txt, lay.prof_x + 2.0, ty);
+            let _ = ctx.fill_text(&txt, lay.prof_x + 3.0, ty);
         }
     }
     ctx.set_font(FONT);

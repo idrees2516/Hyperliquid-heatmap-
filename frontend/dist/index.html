@@ -297,7 +297,7 @@ table.mtab .up{color:var(--buy)} table.mtab .down{color:var(--sell)} table.mtab 
 .warm .pulse{width:10px;height:10px;border-radius:50%;background:var(--accent);animation:wp 1.2s infinite}
 @keyframes wp{0%,100%{opacity:.25}50%{opacity:1}}
 </style>
-<link rel="modulepreload" href="/frontend.js?v=1793888314"><link rel="preload" href="/frontend_bg.wasm?v=1793888314" crossorigin="anonymous" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/frontend.js?v=1793897835"><link rel="preload" href="/frontend_bg.wasm?v=1793897835" crossorigin="anonymous" as="fetch" type="application/wasm"></head>
 <body>
 <header>
   <div class="brand">
@@ -345,11 +345,13 @@ table.mtab .up{color:var(--buy)} table.mtab .down{color:var(--sell)} table.mtab 
         <button class="bt-btn tgl active" data-t="trades">TRADES</button>
         <button class="bt-btn tgl active" data-t="liqs">LIQ</button>
         <button class="bt-btn tgl active" data-t="profile">PROFILE</button>
+        <button class="bt-btn tgl active" data-t="vwap">VWAP</button>
         <button class="bt-btn tgl active" data-t="dom">DOM</button>
         <button class="bt-btn tgl active" data-t="radar">RADAR</button>
         <button class="bt-btn tgl active" data-t="delta">Δ/CVD</button>
       </div>
-      <span class="bt-hint">scroll = zoom · hover = readout · dbl-click = reset heat</span>
+      <button class="bt-btn" id="bt-recenter" title="back to the live edge: refit zoom, price range and heat">RECENTER</button>
+      <span class="bt-hint">scroll = zoom · hover = readout · dbl-click = reset heat · Recenter = live edge</span>
     </div>
     <div id="book-canvas-wrap">
       <canvas id="book-canvas"></canvas>
@@ -370,18 +372,22 @@ table.mtab .up{color:var(--buy)} table.mtab .down{color:var(--sell)} table.mtab 
     <section class="panel">
       <div class="panel-h">Heatmap legend · resting liquidity</div>
       <div style="padding:10px 12px">
-        <div style="height:12px;border-radius:3px;background:linear-gradient(90deg,#0f2252 0%,#2877e6 25%,#b6e2ff 45%,#eae9bb 52%,#ffd467 63%,#ff8c27 80%,#ff2a18 100%)"></div>
+        <div style="height:12px;border-radius:3px;background:linear-gradient(90deg,#050f1f 0%,#0a3660 26%,#1373b0 45%,#7fd0f0 62%,#f8f2c3 74%,#ffe14a 81%,#ff8a00 90%,#e8281c 100%)"></div>
         <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--dim);margin-top:4px">
           <span>thin</span><span>→</span><span>walls</span>
         </div>
         <div style="font-size:10px;color:var(--dim);line-height:1.7;margin-top:8px">
           Every column is a full L2 snapshot (400 ms). Colour = resting size on a log scale:
-          <b style="color:#4599f8">blue</b> thin · <b style="color:#b6e2ff">white</b> heavy ·
-          <b style="color:#ffd467">yellow</b>/<b style="color:#ff2a18">red</b> walls.
-          <b style="color:#1fe3a6">Teal circles</b> = market buys,
-          <b style="color:#ff4d6a">red circles</b> = market sells (sized by $),
-          <b style="color:#ffd24a">gold diamonds</b> = liquidations.
-          Dashed lines = liquidation magnet levels (radar).
+          <b style="color:#1373b0">blue</b> thin · <b style="color:#7fd0f0">cyan</b> heavy ·
+          <b style="color:#f8f2c3">white</b>/<b style="color:#ffe14a">yellow</b> dense ·
+          <b style="color:#e8281c">red</b> walls.
+          <b style="color:#ff4fd0">Pink line</b> = traded price path,
+          dashed <b style="color:#ff8fe0">VWAP ±1σ</b> bands,
+          <b style="color:#1fe3a6">teal</b>/<b style="color:#ff4d6a">red HL circles</b> = whale buys / sells
+          (sized by $), <b style="color:#ffd24a">gold HL diamonds</b> = liquidations,
+          countdown under the last-price tag = candle close.
+          Right columns: <b style="color:#34f0a0">LIQ LEVELS</b> (green long / red short
+          liquidation levels with LEVEL MAX / CUM MAX), volume profile, live DOM ladder.
         </div>
       </div>
     </section>
@@ -484,7 +490,7 @@ table.mtab .up{color:var(--buy)} table.mtab .down{color:var(--sell)} table.mtab 
 
 
 <script type="module">
-import init from '/frontend.js?v=1793888314';
-init({ module_or_path: '/frontend_bg.wasm?v=1793888314' });
+import init from '/frontend.js?v=1793897835';
+init({ module_or_path: '/frontend_bg.wasm?v=1793897835' });
 </script></body>
 </html>
