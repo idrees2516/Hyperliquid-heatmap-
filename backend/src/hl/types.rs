@@ -141,6 +141,32 @@ pub struct HlWsLiquidation {
     pub liqs: Vec<HlLiqInner>,
 }
 
+/// One level in an `l2Book` snapshot.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HlBookLevel {
+    pub px: String,
+    pub sz: String,
+    /// order count — number or string depending on asset
+    #[serde(default)]
+    pub n: serde_json::Value,
+}
+
+/// Full `l2Book` snapshot frame.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HlBook {
+    pub coin: String,
+    pub time: i64,
+    pub levels: HlBookSides,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct HlBookSides {
+    #[serde(default)]
+    pub bids: Vec<HlBookLevel>,
+    #[serde(default)]
+    pub asks: Vec<HlBookLevel>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct HlLiqInner {
     pub coin: String,

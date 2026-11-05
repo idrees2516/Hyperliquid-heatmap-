@@ -4,8 +4,11 @@
 
 ![demo](docs/demo.gif)
 
+![bookmap](docs/bookmap.png)
+
 Onchain Footprint is a realtime order-flow terminal that lets you **look inside every candle across all Hyperliquid perpetuals**. Every trade on Hyperliquid is fully on-chain and attributed to wallets, so the footprint shows *who* is buying and selling, *why* (intent), and *whether those traders are winners or losers*.
 
+- **Bookmap terminal** — a full liquidity-map terminal (`BOOK` tab): live L2 **heatmap** of resting orders (blue → white → yellow → red on a log size scale, one column per book snapshot), **trade bubbles** (teal buys / red sells, sized by $), **gold liquidation diamonds**, the live **DOM ladder** with depth bars, a cumulative **depth chart**, a **volume profile** with POC/VAH/VAL, a **Δ/CVD strip**, and the radar's magnet levels drawn straight onto the map.
 - **Footprint chart** — per price level inside every candle: taker **SELL × BUY** notional (USD), heat-mapped, with the point-of-control outlined and a per-window delta strip.
 - **Who is trading** — every print carries the **taker and maker wallet** (link straight to Hypurrscan). A 60-minute trader leaderboard ranks wallets by flow with per-wallet buy/sell split and market share.
 - **Intent behind each trade** — fills are classified live as `AGGR` (aggressive open/increase), `LIQ` (liquidation), `DELEV` (deleveraging), `STOP` (realized-loss reduce), `TP` (realized-profit reduce), `HEDGE` (cross-market delta-neutral leg) or `REDUCE`.
@@ -19,14 +22,48 @@ Onchain Footprint is a realtime order-flow terminal that lets you **look inside 
 
 ## The UI
 
-Four sidebar views:
+Five sidebar views:
 
 | tab    | what it shows |
 |--------|---------------|
+| `BOOK` | bookmap terminal — live L2 heatmap of resting liquidity, trade bubbles, liquidation diamonds, DOM ladder, depth chart, volume profile (POC/VAH/VAL), Δ/CVD strip, radar magnet lines |
 | `LIVE` | footprint chart, session flow stats, liquidation feed, on-chain tape, trader leaderboard |
 | `RADAR`| magnet levels (state `ARMED / ENGAGED / SWEPT`, estimated forced flow, distance from price), cascade history (`last_cascade`), overhang pills |
 | `OPPS` | live opportunities with kind, strength (0–100), direction bias, target price and TTL |
 | `TUNE` | every engine parameter as a live slider — changes POST to the engine and apply immediately |
+
+### The bookmap terminal (`BOOK` tab)
+
+A bookmap-style liquidity terminal rendered on one canvas:
+
+- **Heatmap** — every column is a full L2 book snapshot. Colour encodes resting
+  size on a log scale from the 15th→96th percentile of visible levels
+  (thin `blue` → heavy `white` → walls `yellow`/`red`). The **HEAT** slider
+  slides the colour window along the size axis (left = only the biggest
+  walls, right = lighter liquidity lights up); double-click resets.
+- **Trade bubbles** — every print lands on the map: teal = market buy, red =
+  market sell, radius by USD. `LIQ`/`DELEV` prints render as **gold diamonds**
+  with a glow and a size label.
+- **DOM ladder** — the live book: worst→best asks (red bars) above the
+  spread row, best→worst bids (teal bars) below, sizes in USD, wall rows
+  outlined.
+- **Depth chart** — cumulative bid/ask curves ±1.2% around mid.
+- **Volume profile** — buy/sell histogram of the visible window with
+  **POC** and the 70% value area (**VAH/VAL**).
+- **Δ/CVD strip** — per-minute taker delta bars with the cumulative-delta line.
+- **Radar overlay** — armed/engaged magnet levels as dashed lines with
+  estimated forced-flow labels.
+- **Interaction** — scroll to zoom time, hover for a price/time/level-size
+  readout, toolbar toggles for every panel, range presets ~3m…~45m.
+
+Book data pipeline: the coin you watch is subscribed to Hyperliquid's
+`l2Book` WS channel *and* polled over REST (~2 Hz) to densify the map (the
+public WS pushes snapshots only every few seconds); snapshots are sampled
+into a ~48-minute column ring per coin and streamed to the browser.
+
+> Note: Hyperliquid's public book (WS and REST alike) is capped at **20
+> levels per side** at the venue's own grouping — the map shows the real
+> public book, nothing synthetic.
 
 ## Stack
 
@@ -45,6 +82,8 @@ Hyperliquid L1 (api.hyperliquid.xyz: info REST + wss realtime)
 │  · enrichment: userFills + clearinghouseState polling   │
 │  · radar: magnet levels, cascades, overhang (persisted) │
 │  · opportunity scanner (magnets, stops, whales, …)      │
+│  · bookmap: L2 book sampler + l2Book poller (persisted   │
+│    column history per watched coin)                     │
 │  · live tuning store (persisted)                        │
 │  · footprint / level-detail aggregation on demand       │
 │  · browser WS fan-out + JSON REST                       │
@@ -55,6 +94,9 @@ Hyperliquid L1 (api.hyperliquid.xyz: info REST + wss realtime)
 │ frontend (Rust → wasm32 via wasm-bindgen / web-sys)    │
 │  · canvas footprint engine (candles + level cells,     │
 │    POC, intent bars, delta strip, crosshair, LIVE tag)  │
+│  · bookmap terminal (offscreen-canvas heatmap with     │
+│    incremental column scroll, DOM ladder, depth,       │
+│    profile, Δ/CVD, radar overlay, crosshair)           │
 │  · realtime tape / liquidations / trader leaderboard    │
 │  · radar / opportunities / tuning panels                 │
 │  · level drill-down modal                               │
@@ -71,17 +113,22 @@ Workspace layout:
 
 ## Run it
 
-Requires: Rust (stable) with the `wasm32-unknown-unknown` target and [trunk].
+Requires: Rust (stable) with the `wasm32-unknown-unknown` target and `wasm-bindgen-cli` (both invoked by `scripts/build-web.sh`).
 
 ```bash
 # build the frontend (wasm -> frontend/dist)
-cd frontend && trunk build --release && cd ..
+./scripts/build-web.sh
 
 # run the backend (serves the UI on http://localhost:3000)
 cargo run --release -p backend
 ```
 
-Then open <http://localhost:3000>. Use the market dropdown to switch coins and the `15s / 1m / 5m / 15m / 1h` buttons to change the footprint window. Click a level cell (or any candle) for the wallet drill-down.
+Then open <http://localhost:3000> — the terminal boots straight into the
+`BOOK` liquidity map (it fills in as book snapshots accumulate; the map
+auto-fits until the ~48-minute history saturates the zoom window). Use the
+market dropdown to switch coins and the `15s / 1m / 5m / 15m / 1h` buttons to
+change the footprint window on the `LIVE` tab. Click a level cell (or any
+candle) for the wallet drill-down.
 
 By default the engine tracks the **top 16 markets by 24h volume** (with a static 20-coin majors fallback while the universe loads). The engine state (radar levels, cascade history, tuning parameters) is persisted under `data/` every 15s and restored on restart, so **overhang signals survive restarts**.
 
@@ -118,6 +165,7 @@ All values are clamped to safe operating ranges; changes apply immediately and a
 ## Data sources & limitations
 
 - All market data comes from Hyperliquid's official on-chain API (`api.hyperliquid.xyz`). The engine aggregates trades from the moment it starts (plus recent-trades backfill and candle history); historical footprints before process start are candle-only.
+- The public `l2Book` feed (WS *and* REST) returns the venue's aggregated book capped at 20 levels per side; the bookmap shows exactly that book. The WS channel pushes a full snapshot only every few seconds, so the backend additionally polls the REST book (~2 Hz, rate-limit budget ≈240 weight/min of the 1200 cap) for the coin each browser client is watching — book history is therefore per-watched-coin and starts when the terminal first opens it.
 - **Subscribing to a delisted/unknown coin makes Hyperliquid reset the whole WebSocket connection.** The connector therefore guards every subscription against the live asset universe (falling back to a vetted static majors list while the universe loads). Keep `FALLBACK_COINS` in `backend/src/engine/mod.rs` consistent with the live universe when editing it.
 - Hyperliquid's WS API carries no market-wide liquidation channel and allows at most 15 `userEvents` subscriptions per connection; liquidation detection therefore combines the top-15 watched holders' `userEvents` with the strict behavioral gates above.
 - Wallet enrichment polls the most active ~24 wallets; conviction/PnL stats are exact from the API, style tags are behavioral estimates.

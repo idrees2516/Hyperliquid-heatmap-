@@ -4,6 +4,7 @@
 //! the state, the realtime WebSocket to the Rust backend, all DOM updates and
 //! the canvas render loop. Pure Rust → wasm via wasm-bindgen / web-sys.
 
+mod bookmap;
 mod canvas;
 mod ui;
 
@@ -11,8 +12,8 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 
 use shared::{
-    window_start, AssetInfo, Candle, FootWindow, FootprintSnapshot, LevelAgg, LevelDetail,
-    LiveLiquidation, LiveTrade, Opportunity, RadarSnapshot, TraderRow, TuningParams,
+    window_start, AssetInfo, BookPayload, Candle, FootWindow, FootprintSnapshot, LevelAgg,
+    LevelDetail, LiveLiquidation, LiveTrade, Opportunity, RadarSnapshot, TraderRow, TuningParams,
 };
 use wasm_bindgen::{closure::Closure, prelude::wasm_bindgen, JsCast, JsValue};
 use web_sys::{MessageEvent, WebSocket};
@@ -42,7 +43,7 @@ pub struct AppState {
     pub opps: Vec<Opportunity>,
     /// current engine tuning params
     pub tuning: Option<TuningParams>,
-    /// active sidebar view: live | radar | opps | tune
+    /// active sidebar view: book | live | radar | opps | tune
     pub side_view: String,
     /// suppress tuning re-render while the user is dragging a slider
     pub tuning_interacting: bool,
@@ -74,7 +75,7 @@ impl Default for AppState {
             radar: None,
             opps: Vec::new(),
             tuning: None,
-            side_view: "live".into(),
+            side_view: "book".into(),
             tuning_interacting: false,
             last_px: 0.0,
             dirty: true,
@@ -94,6 +95,8 @@ thread_local! {
     static STATE: RefCell<AppState> = RefCell::new(AppState::default());
     static WS: RefCell<Option<WebSocket>> = const { RefCell::new(None) };
     static CANVAS: RefCell<Option<web_sys::HtmlCanvasElement>> = const { RefCell::new(None) };
+    static BOOK: RefCell<bookmap::BookView> = RefCell::new(bookmap::BookView::default());
+    static BOOK_CANVAS: RefCell<Option<web_sys::HtmlCanvasElement>> = const { RefCell::new(None) };
     static RAF: RefCell<Option<Closure<dyn FnMut()>>> = RefCell::new(None);
     static TIMERS: RefCell<Vec<gloo_timers::callback::Interval>> = const { RefCell::new(Vec::new()) };
 }
@@ -217,6 +220,8 @@ fn connect_ws() {
         update_dots();
         send_sub_current();
         fetch_snapshot();
+        let coin = STATE.with(|s| s.borrow().coin.clone());
+        fetch_bookmap(&coin);
     });
     ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
     onopen.forget();
@@ -289,6 +294,18 @@ fn handle_msg(txt: &str) {
                 on_candle(coin, &c);
             }
         }
+        "bookcol" => {
+            let coin = v["coin"].as_str().unwrap_or("").to_string();
+            if let Ok(col) = serde_json::from_value::<shared::BookCol>(v["data"].clone()) {
+                BOOK.with(|b| b.borrow_mut().on_col(&coin, col));
+            }
+        }
+        "booklive" => {
+            let coin = v["coin"].as_str().unwrap_or("").to_string();
+            if let Ok(book) = serde_json::from_value::<shared::BookCol>(v["data"].clone()) {
+                BOOK.with(|b| b.borrow_mut().on_live(&coin, book));
+            }
+        }
         "traders" => {
             if let Ok(rows) = serde_json::from_value::<Vec<TraderRow>>(v["data"].clone()) {
                 on_traders(&rows);
@@ -345,6 +362,7 @@ fn apply_assets(v: serde_json::Value) {
                 .or_else(|| assets.first());
             if let Some(p) = pick {
                 st.coin = p.name.clone();
+                BOOK.with(|b| b.borrow_mut().reset(&p.name.clone()));
             }
         }
         st.assets = assets;
@@ -354,6 +372,7 @@ fn apply_assets(v: serde_json::Value) {
     if first_boot {
         send_sub_current();
         fetch_snapshot();
+        fetch_bookmap(STATE.with(|s| s.borrow().coin.clone()).as_str());
     }
     update_header_mark();
 }
@@ -575,6 +594,17 @@ fn on_liq(l: &LiveLiquidation) {
             } else {
                 break;
             }
+        }
+    }
+    // bookmap sidebar feed
+    let bfeed = el::<web_sys::Element>("book-liq-feed");
+    let _ = bfeed.insert_adjacent_html("afterbegin", &ui::liq_row_html(l));
+    while bfeed.child_element_count() > 40 {
+        let node: &web_sys::Node = bfeed.as_ref();
+        if let Some(last) = bfeed.last_element_child() {
+            let _ = node.remove_child(last.as_ref());
+        } else {
+            break;
         }
     }
     set_text("liq-count", &format!("×{}", STATE.with(|s| s.borrow().liqs.len())));
@@ -810,7 +840,7 @@ fn wire_tuning_controls() {
     }
 }
 
-/// Switch the sidebar between LIVE / RADAR / OPPS / TUNE.
+/// Switch the sidebar between BOOK / LIVE / RADAR / OPPS / TUNE.
 fn switch_side_view(view: &str) {
     let tabs = doc().get_elements_by_class_name("side-tab");
     for i in 0..tabs.length() {
@@ -835,14 +865,51 @@ fn switch_side_view(view: &str) {
             );
         }
     }
+    // main area: bookmap terminal vs footprint chart
+    let book_active = view == "book";
+    let _ = el::<web_sys::Element>("live-pane").set_attribute(
+        "style",
+        if book_active { "display:none" } else { "display:flex" },
+    );
+    let _ = el::<web_sys::Element>("book-pane").set_attribute(
+        "style",
+        if book_active { "display:flex" } else { "display:none" },
+    );
     STATE.with(|s| s.borrow_mut().side_view = view.to_string());
     if view == "radar" {
         fetch_radar();
+    }
+    if view == "book" {
+        fetch_bookmap_if_stale();
     }
     let need_tuning = STATE.with(|s| s.borrow().tuning.is_none());
     if view == "tune" && need_tuning {
         fetch_tuning();
     }
+}
+
+/// Fetch the bookmap history snapshot when missing / stale / coin changed.
+fn fetch_bookmap_if_stale() {
+    let coin = STATE.with(|s| s.borrow().coin.clone());
+    if coin.is_empty() {
+        return;
+    }
+    let stale = BOOK.with(|b| b.borrow().stale(&coin));
+    if stale {
+        fetch_bookmap(&coin);
+    }
+}
+
+fn fetch_bookmap(coin: &str) {
+    let coin = coin.to_string();
+    fetch_json(
+        format!("/api/bookmap?coin={coin}&max_cols=1600&trades=700"),
+        move |v| {
+            if let Ok(p) = serde_json::from_value::<BookPayload>(v) {
+                BOOK.with(|b| b.borrow_mut().on_seed(p));
+            }
+        },
+    );
 }
 
 fn fetch_snapshot() {
@@ -953,6 +1020,42 @@ fn flow_tick() {
         &format!("net taker delta · ~{}m span", sums.span_min),
     );
     update_header_mark();
+
+    // bookmap sidebar: ±1% book pressure from the live book
+    BOOK.with(|b| {
+        let bv = b.borrow();
+        if let Some(book) = bv.cur.as_ref() {
+            let mid = book.mid();
+            if mid > 0.0 {
+                let lo = mid * 0.99;
+                let hi = mid * 1.01;
+                let bid: f64 = book
+                    .bids
+                    .iter()
+                    .take_while(|l| l.px >= lo)
+                    .map(|l| l.px * l.sz)
+                    .sum();
+                let ask: f64 = book
+                    .asks
+                    .iter()
+                    .take_while(|l| l.px <= hi)
+                    .map(|l| l.px * l.sz)
+                    .sum();
+                let tot = bid + ask;
+                if tot > 0.0 {
+                    let pb = bid / tot * 100.0;
+                    set_text("bp-bid", &shared::fmt_usd(bid));
+                    set_text("bp-ask", &shared::fmt_usd(ask));
+                    let _ = el::<web_sys::Element>("bp-bar-b")
+                        .set_attribute("style", &format!("width:{pb:.1}%"));
+                    let _ = el::<web_sys::Element>("bp-bar-s")
+                        .set_attribute("style", &format!("width:{:.1}%", 100.0 - pb));
+                    set_text("bp-imb", &format!("{:.0} / {:.0}", pb, 100.0 - pb));
+                    set_text("bp-spread", &format!("spread {:.1}bp", book.spread_bps()));
+                }
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -961,6 +1064,12 @@ fn flow_tick() {
 
 fn canvas_pos(e: &web_sys::MouseEvent) -> Option<(f64, f64)> {
     let canvas = el::<web_sys::HtmlCanvasElement>("chart");
+    let r = canvas.get_bounding_client_rect();
+    Some((e.client_x() as f64 - r.left(), e.client_y() as f64 - r.top()))
+}
+
+fn book_canvas_pos(e: &web_sys::MouseEvent) -> Option<(f64, f64)> {
+    let canvas = el::<web_sys::HtmlCanvasElement>("book-canvas");
     let r = canvas.get_bounding_client_rect();
     Some((e.client_x() as f64 - r.left(), e.client_y() as f64 - r.top()))
 }
@@ -1159,7 +1268,7 @@ pub fn start() {
                 if st.coin == coin {
                     return;
                 }
-                st.coin = coin;
+                st.coin = coin.clone();
                 st.windows.clear();
                 st.candle_gaps.clear();
                 st.tape.clear();
@@ -1172,9 +1281,12 @@ pub fn start() {
             el::<web_sys::Element>("traders-scroll").set_inner_html("");
             el::<web_sys::Element>("radar-levels").set_inner_html("");
             el::<web_sys::Element>("cascade-feed").set_inner_html("");
+            el::<web_sys::Element>("book-liq-feed").set_inner_html("");
+            BOOK.with(|b| b.borrow_mut().reset(&coin));
             send_sub_current();
             fetch_snapshot();
             fetch_radar();
+            fetch_bookmap(&coin);
             update_header_mark();
         });
         sel.set_onchange(Some(onch.as_ref().unchecked_ref()));
@@ -1216,6 +1328,143 @@ pub fn start() {
                         }
                     });
                     fetch_snapshot();
+                });
+                b.add_event_listener_with_callback("click", oncl.as_ref().unchecked_ref())
+                    .unwrap();
+                oncl.forget();
+            }
+        }
+    }
+
+    // ---- bookmap terminal: canvas + toolbar --------------------------------
+    {
+        let bcanvas = el::<web_sys::HtmlCanvasElement>("book-canvas");
+        {
+            let c2 = bcanvas.clone();
+            let mv = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |e| {
+                if let Some((x, y)) = book_canvas_pos(&e) {
+                    BOOK.with(|b| b.borrow_mut().hover = Some((x, y)));
+                }
+            });
+            c2.set_onmousemove(Some(mv.as_ref().unchecked_ref()));
+            mv.forget();
+        }
+        {
+            let c2 = bcanvas.clone();
+            let lv = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+                BOOK.with(|b| b.borrow_mut().hover = None);
+            });
+            c2.set_onmouseleave(Some(lv.as_ref().unchecked_ref()));
+            lv.forget();
+        }
+        {
+            let c2 = bcanvas.clone();
+            let wh = Closure::<dyn FnMut(web_sys::WheelEvent)>::new(move |e: web_sys::WheelEvent| {
+                e.prevent_default();
+                BOOK.with(|b| bookmap::wheel(&mut b.borrow_mut(), e.delta_y()));
+            });
+            c2.set_onwheel(Some(wh.as_ref().unchecked_ref()));
+            wh.forget();
+        }
+        {
+            let c2 = bcanvas.clone();
+            let db = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+                BOOK.with(|b| {
+                    let mut bv = b.borrow_mut();
+                    bv.set_intensity(0.0);
+                    bv.invalidate();
+                });
+                let slider = el::<web_sys::HtmlInputElement>("bt-intensity");
+                slider.set_value("0");
+            });
+            c2.set_ondblclick(Some(db.as_ref().unchecked_ref()));
+            db.forget();
+        }
+        BOOK_CANVAS.with(|c| *c.borrow_mut() = Some(bcanvas));
+
+        // range presets
+        let coll = doc().get_elements_by_class_name("bt-btn");
+        for i in 0..coll.length() {
+            if let Some(b) = coll.item(i) {
+                let Some(cols) = b.get_attribute("data-cols").and_then(|v| v.parse::<usize>().ok()) else {
+                    continue;
+                };
+                let oncl = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
+                    let target = e.target().unwrap();
+                    let btn: web_sys::HtmlElement = target.dyn_into().unwrap();
+                    let active = btn.get_attribute("class").unwrap_or_default().contains("active");
+                    if !active {
+                        // range buttons are exclusive
+                        let all = doc().get_elements_by_class_name("bt-btn");
+                        for j in 0..all.length() {
+                            if let Some(x) = all.item(j) {
+                                if x.get_attribute("data-cols").is_some() {
+                                    let _ = x.set_attribute("class", "bt-btn");
+                                }
+                            }
+                        }
+                        let _ = btn.set_attribute("class", "bt-btn active");
+                        BOOK.with(|b| {
+                            let mut bv = b.borrow_mut();
+                            bv.vis_cols = cols;
+                            bv.invalidate();
+                        });
+                    }
+                });
+                b.add_event_listener_with_callback("click", oncl.as_ref().unchecked_ref())
+                    .unwrap();
+                oncl.forget();
+            }
+        }
+
+        // heat intensity slider
+        {
+            let slider = el::<web_sys::HtmlInputElement>("bt-intensity");
+            let onin = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
+                let target = e.target().unwrap();
+                let s: web_sys::HtmlInputElement = target.dyn_into().unwrap();
+                let v = s.value().parse::<f64>().unwrap_or(0.0) / 100.0;
+                BOOK.with(|b| b.borrow_mut().set_intensity(v));
+            });
+            slider.set_oninput(Some(onin.as_ref().unchecked_ref()));
+            onin.forget();
+        }
+
+        // panel toggles
+        let coll = doc().get_elements_by_class_name("tgl");
+        for i in 0..coll.length() {
+            if let Some(b) = coll.item(i) {
+                let Some(key) = b.get_attribute("data-t") else { continue };
+                let oncl = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
+                    let target = e.target().unwrap();
+                    let btn: web_sys::HtmlElement = target.dyn_into().unwrap();
+                    let cur = btn.get_attribute("class").unwrap_or_default();
+                    let on = cur.contains("active");
+                    let _ = btn.set_attribute(
+                        "class",
+                        &format!("bt-btn tgl{}", if on { "" } else { " active" }),
+                    );
+                    BOOK.with(|b| {
+                        let mut bv = b.borrow_mut();
+                        match key.as_str() {
+                            "trades" => bv.show_trades = !on,
+                            "liqs" => bv.show_liqs = !on,
+                            "profile" => {
+                                bv.show_profile = !on;
+                                bv.invalidate();
+                            }
+                            "dom" => {
+                                bv.show_dom = !on;
+                                bv.invalidate();
+                            }
+                            "radar" => bv.show_radar = !on,
+                            "delta" => {
+                                bv.show_delta = !on;
+                                bv.invalidate();
+                            }
+                            _ => {}
+                        }
+                    });
                 });
                 b.add_event_listener_with_callback("click", oncl.as_ref().unchecked_ref())
                     .unwrap();
@@ -1307,6 +1556,16 @@ pub fn start() {
         // opportunities REST backup (WS pushes every 5s)
         fetch_opps();
     });
+    every(5_000, || {
+        // bookmap resync when the live socket is down
+        let (open, poll, view) = STATE.with(|s| {
+            let st = s.borrow();
+            (st.ws_open, st.poll_mode, st.side_view.clone())
+        });
+        if view == "book" && (!open || poll) {
+            fetch_bookmap_if_stale();
+        }
+    });
     every(30_000, || {
         let (open, poll) = STATE.with(|s| {
             let st = s.borrow();
@@ -1320,6 +1579,7 @@ pub fn start() {
     // render loop
     start_render_loop();
     update_dots();
+    switch_side_view("book");
     connect_ws();
     fetch_assets();
     fetch_tuning();
@@ -1329,7 +1589,25 @@ pub fn start() {
 fn start_render_loop() {
     RAF.with(|r| {
         let cb = Closure::<dyn FnMut()>::new(|| {
-            if let Some(canvas) = CANVAS.with(|c| c.borrow().clone()) {
+            let view = STATE.with(|s| s.borrow().side_view.clone());
+            if view == "book" {
+                if let Some(canvas) = BOOK_CANVAS.with(|c| c.borrow().clone()) {
+                    STATE.with(|s| {
+                        let st = s.borrow();
+                        BOOK.with(|b| {
+                            let mut bv = b.borrow_mut();
+                            bookmap::draw(
+                                &mut bv,
+                                &st.tape,
+                                &st.liqs,
+                                &st.windows,
+                                &st.radar,
+                                &canvas,
+                            );
+                        });
+                    });
+                }
+            } else if let Some(canvas) = CANVAS.with(|c| c.borrow().clone()) {
                 STATE.with(|s| {
                     let mut st = s.borrow_mut();
                     if st.dirty || now() - st.last_draw > 250.0 {

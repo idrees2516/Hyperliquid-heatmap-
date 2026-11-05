@@ -33,11 +33,13 @@ const WATCH_USERS: usize = 15;
 pub async fn run_upstream(state: Arc<AppState>, mut cmds: mpsc::UnboundedReceiver<SubCmd>) {
     let (coin_tx, _coin_rx) = watch::channel(HashSet::<String>::new());
     let (user_tx, _user_rx) = watch::channel(HashSet::<String>::new());
+    let (book_tx, _book_rx) = watch::channel(HashSet::<String>::new());
 
-    // ---- coin subscription manager --------------------------------------------
+    // ---- coin + book subscription manager --------------------------------------
     {
         let state = state.clone();
         let coin_tx = coin_tx.clone();
+        let book_tx = book_tx.clone();
         tokio::spawn(async move {
             while let Some(cmd) = cmds.recv().await {
                 match cmd {
@@ -57,6 +59,30 @@ pub async fn run_upstream(state: Arc<AppState>, mut cmds: mpsc::UnboundedReceive
                         if set.remove(&c) {
                             tracing::info!(coin = %c, "coin deactivated");
                             let _ = coin_tx.send(set);
+                        }
+                    }
+                    SubCmd::WatchBook(c) => {
+                        let mut set = book_tx.borrow().clone();
+                        if set.insert(c.clone()) {
+                            tracing::info!(coin = %c, "l2Book watch activated");
+                            let _ = book_tx.send(set);
+                        }
+                        // REST poller refcount (densifies the heatmap)
+                        let mut bw = state.book_watch.write().unwrap();
+                        *bw.entry(c).or_insert(0) += 1;
+                    }
+                    SubCmd::UnwatchBook(c) => {
+                        let mut set = book_tx.borrow().clone();
+                        if set.remove(&c) {
+                            tracing::info!(coin = %c, "l2Book watch deactivated");
+                            let _ = book_tx.send(set);
+                        }
+                        let mut bw = state.book_watch.write().unwrap();
+                        if let Some(n) = bw.get_mut(&c) {
+                            *n = n.saturating_sub(1);
+                            if *n == 0 {
+                                bw.remove(&c);
+                            }
                         }
                     }
                 }
@@ -121,7 +147,7 @@ pub async fn run_upstream(state: Arc<AppState>, mut cmds: mpsc::UnboundedReceive
                 let _ = state
                     .broadcast
                     .send(crate::engine::EngineEvent::Status { upstream: true });
-                if let Err(e) = run_connection(state.clone(), ws, coin_tx.clone(), user_tx.clone()).await {                    tracing::warn!("upstream connection ended: {e:?}");
+                if let Err(e) = run_connection(state.clone(), ws, coin_tx.clone(), user_tx.clone(), book_tx.clone()).await {                    tracing::warn!("upstream connection ended: {e:?}");
                 }
             }
             Err(e) => {
@@ -204,6 +230,7 @@ async fn run_connection(
     ws: WsStream,
     coin_tx: watch::Sender<HashSet<String>>,
     user_tx: watch::Sender<HashSet<String>>,
+    book_tx: watch::Sender<HashSet<String>>,
 ) -> anyhow::Result<()> {
     let (mut sink, mut stream) = ws.split();
 
@@ -230,6 +257,20 @@ async fn run_connection(
         subscribed_users.insert(u);
     }
 
+    // subscribe to live L2 books (bookmap terminal) — only coins a browser
+    // client is actively watching, since full-book snapshots are chatty
+    let mut subscribed_books: HashSet<String> = HashSet::new();
+    let initial_books: Vec<String> = book_tx
+        .borrow()
+        .iter()
+        .cloned()
+        .filter(|c| state.coin_tradable(c))
+        .collect();
+    for c in initial_books {
+        send_json(&mut sink, serde_json::json!({"method":"subscribe","subscription":{"type":"l2Book","coin":c}})).await;
+        subscribed_books.insert(c);
+    }
+
     // NOTE: there is no market-wide liquidation channel on Hyperliquid's
     // WS API (wLiquidation/wDeleveraging are not valid subscription types
     // there); liquidations are surfaced per user through `userEvents`
@@ -249,6 +290,7 @@ async fn run_connection(
 
     let mut coin_rx = coin_tx.subscribe();
     let mut user_rx = user_tx.subscribe();
+    let mut book_rx = book_tx.subscribe();
 
     loop {
         let msg = tokio::select! {
@@ -295,6 +337,24 @@ async fn run_connection(
                 }
                 continue;
             }
+            _ = book_rx.changed() => {
+                let new_set = book_rx.borrow_and_update().clone();
+                let to_add: Vec<String> = new_set
+                    .difference(&subscribed_books)
+                    .filter(|c| state.coin_tradable(c))
+                    .cloned()
+                    .collect();
+                for c in to_add {
+                    send_json(&mut sink, serde_json::json!({"method":"subscribe","subscription":{"type":"l2Book","coin":c}})).await;
+                    subscribed_books.insert(c);
+                }
+                let to_rm: Vec<String> = subscribed_books.difference(&new_set).cloned().collect();
+                for c in to_rm {
+                    send_json(&mut sink, serde_json::json!({"method":"unsubscribe","subscription":{"type":"l2Book","coin":c}})).await;
+                    subscribed_books.remove(&c);
+                }
+                continue;
+            }
         };
 
         let Message::Text(txt) = msg else {
@@ -329,6 +389,12 @@ async fn run_connection(
                     if let Some(cd) = c.to_candle() {
                         state.update_candle(&c.s, cd);
                     }
+                }
+            }
+            "l2Book" => {
+                // data is a single object (not an array)
+                if let Ok(book) = serde_json::from_value::<crate::hl::types::HlBook>(env.data.clone()) {
+                    state.process_book(&book);
                 }
             }
             "userEvents" => {

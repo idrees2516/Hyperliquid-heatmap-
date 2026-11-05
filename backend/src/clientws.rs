@@ -73,13 +73,32 @@ async fn client_socket(socket: WebSocket, state: Arc<AppState>) {
     };
 
     // writer: forward engine events (filtered) + direct messages
+    let writer_state = state.clone();
     let writer = async move {
         loop {
             tokio::select! {
                 maybe_sub = sub_rx.recv() => {
                     match maybe_sub {
-                        Some(s) => current_sub = s,
-                        None => break,
+                        Some(s) => {
+                            // bookmap: stop watching the previous coin's L2 book,
+                            // start watching the new one (no-op when unchanged)
+                            if current_sub.as_ref() != s.as_ref() {
+                                if let Some(old) = current_sub.as_ref() {
+                                    let _ = writer_state.sub_cmds.send(SubCmd::UnwatchBook(old.clone()));
+                                }
+                                if let Some(c) = s.as_ref() {
+                                    let _ = writer_state.sub_cmds.send(SubCmd::WatchBook(c.clone()));
+                                }
+                                current_sub = s;
+                            }
+                        }
+                        None => {
+                            // socket closed / reader dropped: release the book watch
+                            if let Some(old) = current_sub.as_ref() {
+                                let _ = writer_state.sub_cmds.send(SubCmd::UnwatchBook(old.clone()));
+                            }
+                            break;
+                        }
                     }
                 }
                 out = out_rx.recv() => {
@@ -111,6 +130,12 @@ async fn client_socket(socket: WebSocket, state: Arc<AppState>) {
                         crate::engine::EngineEvent::Candle { coin, candle } => want_coin
                             .filter(|c| *coin == *c)
                             .map(|_| json!({"type": "candle", "coin": coin, "data": candle}).to_string()),
+                        crate::engine::EngineEvent::BookCol { coin, col } => want_coin
+                            .filter(|c| *coin == *c)
+                            .map(|_| json!({"type": "bookcol", "coin": coin, "data": col}).to_string()),
+                        crate::engine::EngineEvent::BookLive { coin, book } => want_coin
+                            .filter(|c| *coin == *c)
+                            .map(|_| json!({"type": "booklive", "coin": coin, "data": book}).to_string()),
                         crate::engine::EngineEvent::Traders { coin, rows } => want_coin
                             .filter(|c| *coin == *c)
                             .map(|_| json!({"type": "traders", "coin": coin, "data": rows}).to_string()),

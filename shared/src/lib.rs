@@ -715,3 +715,71 @@ pub fn short_addr(a: &str) -> String {
         a.to_string()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Bookmap terminal (live L2 book history)
+// ---------------------------------------------------------------------------
+
+/// upper bound on returned heatmap columns (server retains more)
+pub const MAX_BOOK_COLS: usize = 7_200;
+
+/// One resting-order level in a book snapshot.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct BookLevel {
+    pub px: f64,
+    /// base-asset size resting at the level
+    pub sz: f64,
+    /// number of aggregated orders at the level (Hyperliquid reports it)
+    #[serde(default)]
+    pub n: f64,
+}
+
+impl BookLevel {
+    pub fn usd(&self) -> f64 {
+        self.px * self.sz
+    }
+}
+
+/// One sampled book snapshot — a single heatmap column.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BookCol {
+    pub t: i64,
+    /// best (highest) bid first
+    pub bids: Vec<BookLevel>,
+    /// best (lowest) ask first
+    pub asks: Vec<BookLevel>,
+}
+
+impl BookCol {
+    pub fn mid(&self) -> f64 {
+        match (self.bids.first(), self.asks.first()) {
+            (Some(b), Some(a)) => (b.px + a.px) / 2.0,
+            (Some(b), None) => b.px,
+            (None, Some(a)) => a.px,
+            (None, None) => 0.0,
+        }
+    }
+    pub fn spread_bps(&self) -> f64 {
+        let (Some(b), Some(a)) = (self.bids.first(), self.asks.first()) else { return 0.0 };
+        if b.px <= 0.0 { return 0.0 }
+        (a.px - b.px) / b.px * 10_000.0
+    }
+}
+
+/// REST payload for the bookmap terminal.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BookPayload {
+    pub coin: String,
+    /// downsampled column history, oldest first
+    pub cols: Vec<BookCol>,
+    /// latest compact book snapshot (DOM ladder / depth chart source)
+    pub book: Option<BookCol>,
+    /// recent prints for the trade bubbles
+    pub trades: Vec<LiveTrade>,
+    /// recent liquidations
+    pub liqs: Vec<LiveLiquidation>,
+    /// server sampling cadence (ms per heatmap column)
+    pub sample_ms: i64,
+    /// total columns retained server-side
+    pub hist_cols: usize,
+}

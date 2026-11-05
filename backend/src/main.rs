@@ -32,6 +32,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(hl::ws::run_upstream(state.clone(), sub_rx));
     tokio::spawn(hl::ws::run_default_set(state.clone()));
     tokio::spawn(hl::ws::run_candle_gapfill(state.clone()));
+    tokio::spawn(engine::bookmap::run_book_poll(state.clone()));
     tokio::spawn(engine::tasks::run_assets_poll(state.clone()));
     tokio::spawn(engine::tasks::run_enrichment(state.clone()));
     tokio::spawn(engine::tasks::run_traders_push(state.clone()));
@@ -58,6 +59,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/radar", get(api::radar))
         .route("/api/cascades", get(api::cascades))
         .route("/api/opps", get(api::opps))
+        .route("/api/bookmap", get(api::bookmap))
         .route("/api/health", get(api::health))
         .route("/ws", get(clientws::ws_handler))
         .fallback_service(ServeDir::new(&dist))

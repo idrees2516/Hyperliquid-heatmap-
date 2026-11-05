@@ -55,8 +55,27 @@ header{
 #mode-badge{font-size:9px;color:var(--gold);border:1px solid #4a3d1a;border-radius:4px;padding:2px 6px;display:none}
 
 /* ---------- main split ---------- */
-#chart-wrap{position:relative;overflow:hidden;background:var(--bg)}
+#chart-wrap{position:relative;overflow:hidden;background:var(--bg);display:flex;flex-direction:column}
+.pane{position:relative;flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
 #chart{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:crosshair}
+#book-pane{display:none}
+#book-toolbar{
+  flex:none;display:flex;align-items:center;gap:14px;padding:5px 10px;flex-wrap:wrap;
+  background:var(--panel2);border-bottom:1px solid var(--line);
+}
+.bt-title{font-size:10px;font-weight:700;letter-spacing:1.4px;color:var(--accent)}
+.bt-group{display:flex;align-items:center;gap:4px}
+.bt-lbl{font-size:9px;color:var(--dim);letter-spacing:1px;margin-right:2px}
+.bt-btn{
+  background:transparent;color:var(--dim);border:1px solid var(--line2);border-radius:5px;padding:3px 8px;
+  cursor:pointer;font-family:inherit;font-size:9.5px;font-weight:700;letter-spacing:.5px;
+}
+.bt-btn:hover:not(.active){color:var(--txt)}
+.bt-btn.active{background:#132433;color:var(--accent);border-color:#1d3a54}
+#bt-intensity{width:110px;accent-color:#2dd4bf}
+.bt-hint{font-size:9px;color:var(--dim);margin-left:auto}
+#book-canvas-wrap{position:relative;flex:1;min-height:0}
+#book-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:crosshair}
 #tooltip{
   position:absolute;pointer-events:none;display:none;z-index:5;
   background:rgba(8,13,21,.94);border:1px solid var(--line2);border-radius:8px;
@@ -117,6 +136,7 @@ aside{
 
 /* liquidations */
 #liq-feed{overflow-y:auto;padding:4px 0;flex:1;min-height:0}
+#book-liq-feed{overflow-y:auto;padding:4px 0;flex:1;min-height:0}
 .liq-row{display:flex;align-items:center;gap:7px;padding:3.5px 12px;font-size:10.5px;border-bottom:1px solid rgba(21,32,46,.5)}
 .liq-row .t{color:var(--dim);min-width:52px}
 .liq-row .c{color:var(--bright);font-weight:700;min-width:52px}
@@ -302,19 +322,89 @@ table.mtab .up{color:var(--buy)} table.mtab .down{color:var(--sell)} table.mtab 
 </header>
 
 <div id="chart-wrap">
-  <canvas id="chart"></canvas>
-  <div id="tooltip"></div>
+  <div id="live-pane" class="pane">
+    <canvas id="chart"></canvas>
+    <div id="tooltip"></div>
+  </div>
+  <div id="book-pane" class="pane">
+    <div id="book-toolbar">
+      <span class="bt-title">LIQUIDITY&nbsp;MAP</span>
+      <div class="bt-group" id="bt-range">
+        <span class="bt-lbl">RANGE</span>
+        <button class="bt-btn" data-cols="400">~3m</button>
+        <button class="bt-btn" data-cols="900">~6m</button>
+        <button class="bt-btn active" data-cols="1800">~12m</button>
+        <button class="bt-btn" data-cols="3600">~24m</button>
+        <button class="bt-btn" data-cols="6800">~45m</button>
+      </div>
+      <div class="bt-group">
+        <span class="bt-lbl">HEAT</span>
+        <input type="range" id="bt-intensity" min="-100" max="100" value="0" title="colour window: left = only the biggest walls, right = thinner liquidity">
+      </div>
+      <div class="bt-group" id="bt-toggles">
+        <button class="bt-btn tgl active" data-t="trades">TRADES</button>
+        <button class="bt-btn tgl active" data-t="liqs">LIQ</button>
+        <button class="bt-btn tgl active" data-t="profile">PROFILE</button>
+        <button class="bt-btn tgl active" data-t="dom">DOM</button>
+        <button class="bt-btn tgl active" data-t="radar">RADAR</button>
+        <button class="bt-btn tgl active" data-t="delta">Δ/CVD</button>
+      </div>
+      <span class="bt-hint">scroll = zoom · hover = readout · dbl-click = reset heat</span>
+    </div>
+    <div id="book-canvas-wrap">
+      <canvas id="book-canvas"></canvas>
+    </div>
+  </div>
 </div>
 
 <aside>
   <div class="side-tabs">
-    <button class="side-tab active" data-view="live">LIVE</button>
+    <button class="side-tab active" data-view="book">BOOK</button>
+    <button class="side-tab" data-view="live">LIVE</button>
     <button class="side-tab" data-view="radar">RADAR<span class="badge-n" id="radar-badge"></span></button>
     <button class="side-tab" data-view="opps">OPPS<span class="badge-n" id="opps-badge"></span></button>
     <button class="side-tab" data-view="tune">TUNE</button>
   </div>
 
-  <div class="side-view active" id="view-live">
+  <div class="side-view active" id="view-book" style="grid-template-rows:auto auto 1fr">
+    <section class="panel">
+      <div class="panel-h">Heatmap legend · resting liquidity</div>
+      <div style="padding:10px 12px">
+        <div style="height:12px;border-radius:3px;background:linear-gradient(90deg,#0f2252 0%,#2877e6 25%,#b6e2ff 45%,#eae9bb 52%,#ffd467 63%,#ff8c27 80%,#ff2a18 100%)"></div>
+        <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--dim);margin-top:4px">
+          <span>thin</span><span>→</span><span>walls</span>
+        </div>
+        <div style="font-size:10px;color:var(--dim);line-height:1.7;margin-top:8px">
+          Every column is a full L2 snapshot (400 ms). Colour = resting size on a log scale:
+          <b style="color:#4599f8">blue</b> thin · <b style="color:#b6e2ff">white</b> heavy ·
+          <b style="color:#ffd467">yellow</b>/<b style="color:#ff2a18">red</b> walls.
+          <b style="color:#1fe3a6">Teal circles</b> = market buys,
+          <b style="color:#ff4d6a">red circles</b> = market sells (sized by $),
+          <b style="color:#ffd24a">gold diamonds</b> = liquidations.
+          Dashed lines = liquidation magnet levels (radar).
+        </div>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-h">Book pressure · ±1%</div>
+      <div style="padding:10px 12px">
+        <div style="display:flex;justify-content:space-between;font-size:10.5px;margin-bottom:4px">
+          <span style="color:var(--buy)">BIDS <b id="bp-bid">—</b></span>
+          <span style="color:var(--sell)"><b id="bp-ask">—</b> ASKS</span>
+        </div>
+        <div class="split-bar"><div class="b" id="bp-bar-b" style="width:50%"></div><div class="s" id="bp-bar-s" style="width:50%"></div></div>
+        <div style="display:flex;justify-content:space-between;font-size:9.5px;color:var(--dim);margin-top:4px">
+          <span id="bp-imb">50 / 50</span><span id="bp-spread">spread —</span>
+        </div>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-h">Liquidations · live <span class="livechip">streaming</span></div>
+      <div id="book-liq-feed" class="feed" style="overflow-y:auto"></div>
+    </section>
+  </div>
+
+  <div class="side-view" id="view-live">
     <section class="panel" id="flow-panel">
       <div class="panel-h">On-chain flow · session</div>
       <div id="flow">

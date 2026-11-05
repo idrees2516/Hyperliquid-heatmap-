@@ -31,6 +31,7 @@ web-sys = { version = "0.3", features = [
     "CloseEvent",
     "ErrorEvent",
     "MouseEvent",
+    "WheelEvent",
     "KeyboardEvent",
     "HtmlInputElement",
     "HtmlButtonElement",

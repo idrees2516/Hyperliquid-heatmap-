@@ -1,5 +1,6 @@
 //! Engine: central application state + trade/liquidation/candle processing.
 
+pub mod bookmap;
 pub mod market;
 pub mod opps;
 pub mod persist;
@@ -40,6 +41,10 @@ pub const FALLBACK_COINS: &[&str] = &[
 pub enum SubCmd {
     AddCoin(String),
     RemoveCoin(String),
+    /// a browser client wants the live L2 book (bookmap) for this coin
+    WatchBook(String),
+    /// a browser client stopped watching the L2 book for this coin
+    UnwatchBook(String),
 }
 
 /// Events broadcast to browser clients.
@@ -49,6 +54,10 @@ pub enum EngineEvent {
     Trade(LiveTrade),
     Liquidation(LiveLiquidation),
     Candle { coin: String, candle: Candle },
+    /// a fresh heatmap column was sampled (bookmap history)
+    BookCol { coin: String, col: shared::BookCol },
+    /// throttled live book snapshot (DOM ladder / depth)
+    BookLive { coin: String, book: shared::BookCol },
     Traders { coin: String, rows: Vec<TraderRow> },
     Radar { coin: String, snapshot: shared::RadarSnapshot },
     Opps(Vec<shared::Opportunity>),
@@ -62,6 +71,10 @@ pub struct AppState {
     pub traders: RwLock<HashMap<String, Arc<Mutex<traders::TraderState>>>>,
     /// liquidation radar per coin (persisted)
     pub radar: RwLock<HashMap<String, Arc<Mutex<radar::RadarState>>>>,
+    /// sampled L2 book history per coin (bookmap terminal)
+    pub books: RwLock<HashMap<String, Arc<Mutex<bookmap::BookState>>>>,
+    /// refcount of browser clients watching each coin's L2 book
+    pub book_watch: RwLock<HashMap<String, u32>>,
     /// global recent cascade records (persisted), newest last
     pub cascades: Mutex<VecDeque<shared::CascadeRecord>>,
     pub broadcast: broadcast::Sender<EngineEvent>,
@@ -104,6 +117,8 @@ impl AppState {
             coins: RwLock::new(HashMap::new()),
             traders: RwLock::new(HashMap::new()),
             radar: RwLock::new(radar_map),
+            books: RwLock::new(HashMap::new()),
+            book_watch: RwLock::new(HashMap::new()),
             cascades: Mutex::new(cascades),
             broadcast: tx,
             sub_cmds,
@@ -147,6 +162,16 @@ impl AppState {
 
     pub fn get_radar(&self, coin: &str) -> Option<Arc<Mutex<radar::RadarState>>> {
         self.radar.read().unwrap().get(coin).cloned()
+    }
+
+    pub fn get_or_create_book(&self, coin: &str) -> Arc<Mutex<bookmap::BookState>> {
+        if let Some(b) = self.books.read().unwrap().get(coin) {
+            return b.clone();
+        }
+        let mut w = self.books.write().unwrap();
+        w.entry(coin.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(bookmap::BookState::new(coin))))
+            .clone()
     }
 
     /// May we subscribe to this coin upstream? Subscribing to a coin that
@@ -485,6 +510,38 @@ impl AppState {
                     "cascade finalized"
                 );
                 self.push_cascade(rec);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // L2 book (bookmap terminal)
+    // -----------------------------------------------------------------------
+
+    /// Process one full `l2Book` snapshot from upstream: refresh the live
+    /// book, sample heatmap columns and broadcast both to browsers.
+    pub fn process_book(&self, b: &crate::hl::types::HlBook) {
+        let bids = bookmap::parse_levels(&b.levels.bids, true);
+        let asks = bookmap::parse_levels(&b.levels.asks, false);
+        if bids.is_empty() || asks.is_empty() {
+            return;
+        }
+        let bs = self.get_or_create_book(&b.coin);
+        let (col, push_live, live) = {
+            let mut g = bs.lock().unwrap();
+            let (col, push_live) = g.on_snapshot(b.time, bids, asks);
+            (col, push_live, g.live_book())
+        };
+        if let Some(c) = col {
+            let _ = self
+                .broadcast
+                .send(EngineEvent::BookCol { coin: b.coin.clone(), col: c });
+        }
+        if push_live {
+            if let Some(book) = live {
+                let _ = self
+                    .broadcast
+                    .send(EngineEvent::BookLive { coin: b.coin.clone(), book });
             }
         }
     }

@@ -236,6 +236,84 @@ pub async fn tuning_reset(State(state): State<Arc<AppState>>) -> impl IntoRespon
 }
 
 // ---------------------------------------------------------------------------
+// Bookmap terminal (live L2 book history)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+pub struct BookQuery {
+    pub coin: String,
+    /// max heatmap columns to return (evenly downsampled)
+    #[serde(default = "default_book_cols")]
+    pub max_cols: usize,
+    /// max recent prints for the bubbles
+    #[serde(default = "default_book_trades")]
+    pub trades: usize,
+}
+
+fn default_book_cols() -> usize {
+    1_600
+}
+fn default_book_trades() -> usize {
+    600
+}
+
+pub async fn bookmap(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<BookQuery>,
+) -> Result<Json<shared::BookPayload>, ApiError> {
+    let max_cols = q.max_cols.clamp(50, shared::MAX_BOOK_COLS);
+    let max_trades = q.trades.clamp(50, 3_000);
+    let (trades, liqs) = {
+        let cs = state.get_or_create_coin(&q.coin);
+        let inner = cs.inner.lock().unwrap();
+        let trades: Vec<shared::LiveTrade> = inner
+            .trades
+            .iter()
+            .rev()
+            .take(max_trades)
+            .rev()
+            .map(|t| shared::LiveTrade {
+                coin: q.coin.clone(),
+                t: t.t,
+                px: t.px,
+                sz: t.sz,
+                usd: t.usd,
+                side: t.side,
+                taker: t.taker.clone(),
+                maker: t.maker.clone(),
+                intent: t.intent,
+                action: t.action,
+                rpn: t.rpn,
+                taker_style: String::new(),
+                taker_pnl: None,
+                taker_tag: String::new(),
+                taker_label: None,
+            })
+            .collect();
+        let liqs: Vec<shared::LiveLiquidation> = inner
+            .liqs
+            .iter()
+            .rev()
+            .take(150)
+            .rev()
+            .map(|l| shared::LiveLiquidation {
+                coin: q.coin.clone(),
+                user: l.user.clone(),
+                sz: l.sz,
+                usd: l.usd,
+                px: l.px,
+                long: l.long,
+                t: l.t,
+            })
+            .collect();
+        (trades, liqs)
+    };
+    let bs = state.get_or_create_book(&q.coin);
+    let payload = bs.lock().unwrap().payload(&q.coin, max_cols, trades, liqs);
+    Ok(Json(payload))
+}
+
+// ---------------------------------------------------------------------------
 // Radar (magnet levels / cascades / overhang)
 // ---------------------------------------------------------------------------
 
