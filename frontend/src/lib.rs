@@ -903,7 +903,7 @@ fn fetch_bookmap_if_stale() {
 fn fetch_bookmap(coin: &str) {
     let coin = coin.to_string();
     fetch_json(
-        format!("/api/bookmap?coin={coin}&max_cols=1600&trades=700"),
+        format!("/api/bookmap?coin={coin}&max_cols=6000&trades=700"),
         move |v| {
             if let Ok(p) = serde_json::from_value::<BookPayload>(v) {
                 BOOK.with(|b| b.borrow_mut().on_seed(p));
@@ -1483,14 +1483,14 @@ pub fn start() {
                 BOOK.with(|b| b.borrow_mut().recenter());
                 let slider = el::<web_sys::HtmlInputElement>("bt-intensity");
                 slider.set_value("0");
-                // restore the ~12m range preset as active
+                // restore the ~24m range preset as active
                 let all = doc().get_elements_by_class_name("bt-btn");
                 for j in 0..all.length() {
                     if let Some(x) = all.item(j) {
                         if let Some(c) = x.get_attribute("data-cols") {
                             let _ = x.set_attribute(
                                 "class",
-                                if c == "1800" { "bt-btn active" } else { "bt-btn" },
+                                if c == "3600" { "bt-btn active" } else { "bt-btn" },
                             );
                         }
                     }

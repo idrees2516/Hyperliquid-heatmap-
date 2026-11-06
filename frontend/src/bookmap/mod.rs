@@ -59,6 +59,27 @@ fn ramp(v: f64) -> &'static str {
 
 const BG: &str = "#050f1f";
 const GRID: &str = "#0b1a30";
+
+// ---------------------------------------------------------------------------
+// heat window anchors — tuned for a DENSE map
+// ---------------------------------------------------------------------------
+// Percentiles of resting notional (log space) over the visible window that
+// anchor the colour ramp. Reference terminal used p15..p94; that crushes the
+// book's body to background and clips persistent walls at max red. Tuned:
+//   - HEAT_PLO 0.15 -> 0.07 : more of the small/medium levels paint, so the
+//     body of the book fills in (denser look, especially after a long
+//     warm-up when the price has toured many resting bands)
+//   - HEAT_PHI 0.94 -> 0.98 : more headroom, so whale walls spread across
+//     white->yellow->red instead of all clipping at max
+//   - HEAT_MIN_RATIO 1.6 -> 1.5 : slightly narrower log window = richer
+//     mid-tones per notional step
+const HEAT_PLO: f64 = 0.07;
+const HEAT_PHI: f64 = 0.98;
+const HEAT_MIN_RATIO: f64 = 1.5;
+/// default zoom window in columns — 3600 × 400 ms = 24 min of heat (the
+/// `~24m` range preset), so a long warm-up is actually shown as one dense
+/// map; zoom out to ~45m (6800) for the full retained history
+const DEF_VIS_COLS: usize = 3_600;
 const C_DIM: &str = "#5b6b80";
 const C_TXT: &str = "#c9d6e4";
 const BUY: &str = "#1fe3a6";
@@ -117,7 +138,7 @@ impl Default for BookView {
             seed_trades: VecDeque::new(),
             seed_liqs: VecDeque::new(),
             fetched_at: 0.0,
-            vis_cols: 1_600,
+            vis_cols: DEF_VIS_COLS,
             intensity: 0.0,
             show_trades: true,
             show_liqs: true,
@@ -151,7 +172,9 @@ impl BookView {
     }
 
     pub fn stale(&self, coin: &str) -> bool {
-        self.coin != coin || js_sys::Date::now() - self.fetched_at > 20_000.0
+        // 60s: the seed is now the full 6000-col history, so re-parsing it is
+        // expensive; live WS columns keep the map current between seeds
+        self.coin != coin || js_sys::Date::now() - self.fetched_at > 60_000.0
     }
 
     pub fn on_seed(&mut self, p: BookPayload) {
@@ -196,7 +219,7 @@ impl BookView {
 
     /// back to the live edge: default zoom, auto price fit, neutral heat
     pub fn recenter(&mut self) {
-        self.vis_cols = 1_800;
+        self.vis_cols = DEF_VIS_COLS;
         self.px_lo = 0.0;
         self.px_hi = 0.0;
         self.intensity = 0.0;
@@ -514,8 +537,8 @@ pub fn draw(
             if samples.len() >= 24 {
                 samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let pick = |q: f64| samples[((samples.len() as f64 - 1.0) * q) as usize].max(1.0);
-                wlo = pick(0.15);
-                whi = pick(0.94).max(wlo * 1.6);
+                wlo = pick(HEAT_PLO);
+                whi = pick(HEAT_PHI).max(wlo * HEAT_MIN_RATIO);
             } else {
                 wlo = 2_000.0;
                 whi = 400_000.0;
@@ -901,7 +924,7 @@ fn draw_column(
             let l = side[j];
             let usd = l.px * l.sz;
             let v = ((usd.ln() - lg_lo) / lg_span).clamp(0.0, 1.0);
-            if v <= 0.03 {
+            if v <= 0.02 {
                 continue;
             }
             // band between midpoints to neighbour levels

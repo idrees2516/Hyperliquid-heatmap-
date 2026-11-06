@@ -39,12 +39,14 @@ reference liquidity-map screenshots (blue/red resting orders, pink price
 path, LIQ LEVELS rail):
 
 - **Heatmap** — every column is a full L2 book snapshot. Colour encodes resting
-  size on a log scale from the 15th→94th percentile of visible levels using
-  the reference ramp `navy → blue → cyan → white → yellow → orange → red`
-  (thin `blue` resting orders → walls `red`); the zero colour equals the pane
-  background. The **HEAT** slider slides the colour window along the size
-  axis (left = only the biggest walls, right = lighter liquidity lights up);
-  double-click resets.
+  size on a log scale anchored at the **7th→98th percentile** of visible
+  levels (tuned from the reference p15/p94: a lower floor keeps the book's
+  body painted, a higher ceiling stops persistent walls from clipping at max)
+  using the reference ramp `navy → blue → cyan → white → yellow → orange →
+  red` (thin `blue` resting orders → walls `red`); the zero colour equals the
+  pane background. The **HEAT** slider slides the colour window along the
+  size axis (left = only the biggest walls, right = lighter liquidity lights
+  up); double-click resets.
 - **Price path** — the traded price traces a **pink** line across the heat
   (with a dark casing so it reads over bright walls); the axis carries the
   last-price tag plus an **m:ss candle-close countdown** beneath it.
@@ -78,6 +80,16 @@ Book data pipeline: the coin you watch is subscribed to Hyperliquid's
 `l2Book` WS channel *and* polled over REST (~2 Hz) to densify the map (the
 public WS pushes snapshots only every few seconds); snapshots are sampled
 into a ~48-minute column ring per coin and streamed to the browser.
+
+**Warm-up & density** — the map is a history, not an instant snapshot: a
+heat column lands every 400 ms, so the plot fills in over time and a
+*longer warm-up means a denser map* (more resting bands toured by price,
+more prints, richer percentiles). The default view is the **~24m** range
+preset (3,600 columns); zoom out to **~45m** once the ring has filled
+(~30–48 min of watching). The initial REST seed carries up to 6,000
+columns so a page refresh keeps the full accumulated history, and the
+percentile anchors are recomputed live over the visible window — the
+longer the window, the more stable the colour mapping.
 
 > Note: Hyperliquid's public book (WS and REST alike) is capped at **20
 > levels per side** at the venue's own grouping — the map shows the real
