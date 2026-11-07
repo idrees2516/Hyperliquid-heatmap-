@@ -6,6 +6,16 @@
 
 ![bookmap](docs/bookmap.png)
 
+Collapsible TapeSurf-style right panels (click a header to fold, the heatmap re-fills the width; `RECENTER` re-expands everything):
+
+| [full terminal](docs/screenshots/01-book-terminal.png) | [ORDER BOOK · DETAILED](docs/screenshots/02-orderbook-detailed.png) | [LIQ LEVELS pills](docs/screenshots/07-liq-levels-panel.png) |
+|---|---|---|
+| ![full](docs/screenshots/01-book-terminal.png) | ![detailed](docs/screenshots/02-orderbook-detailed.png) | ![liq](docs/screenshots/07-liq-levels-panel.png) |
+
+| [panels collapsed to rails](docs/screenshots/03-panels-collapsed.png) | [ORDER BOOK · COMPACT](docs/screenshots/04-orderbook-compact.png) | [full-width (sidebar hidden)](docs/screenshots/05-fullwidth-terminal.png) |
+|---|---|---|
+| ![collapsed](docs/screenshots/03-panels-collapsed.png) | ![compact](docs/screenshots/04-orderbook-compact.png) | ![fullwidth](docs/screenshots/05-fullwidth-terminal.png) |
+
 Onchain Footprint is a realtime order-flow terminal that lets you **look inside every candle across all Hyperliquid perpetuals**. Every trade on Hyperliquid is fully on-chain and attributed to wallets, so the footprint shows *who* is buying and selling, *why* (intent), and *whether those traders are winners or losers*.
 
 - **Bookmap terminal** — a full TapeSurf-style liquidity-map terminal (`BOOK` tab): live L2 **heatmap** with split ramps (**asks blue→cyan, bids green→mint**, log size scale, one column per book snapshot), a **yellow stepped price path**, **1m candles** (teal up / red down, auto timeframe), thin-white dashed **VWAP ±1σ**, **dotted wall tracks**, **cyan execution-flash columns**, a bottom **volume histogram**, **trade bubbles** (teal buys / red sells, whale prints venue-tagged `HL`), **gold liquidation diamonds**, a **LIQ LEVELS rail**, the live **ORDER BOOK ladder** (bids/asks % split header, depth bars, order-count chips, cumulative-depth staircase, current-price pill with a time-at-price timer), a cumulative **depth chart**, a **volume profile** with POC/VAH/VAL, a **Δ/CVD strip**, and the radar's magnet levels drawn straight onto the map — all framed by a floating TapeSurf-style control card (Heatmap slider, Time tabs, Trades/Candles toggles, Volume total, Profits, book-imbalance bar). **Every right-side panel is collapsible** (TapeSurf-style header bars with drag grips and chevrons — click to fold a panel into a thin vertical rail; RECENTER re-expands them all), and the whole right sidebar folds away with the **◧** header button for a full-width terminal.
