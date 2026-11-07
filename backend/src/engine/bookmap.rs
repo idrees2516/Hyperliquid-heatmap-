@@ -177,7 +177,7 @@ pub fn parse_levels(raw: &[crate::hl::types::HlBookLevel], bids: bool) -> Vec<Bo
 /// `l2Book` endpoint for coins a browser client is actively watching.
 /// Rate-limit budget: l2Book costs weight 2; two coins at ~2 Hz stays far
 /// below Hyperliquid's 1200 weight/min cap.
-const POLL_MIN_MS: i64 = 450;
+const POLL_MIN_MS: i64 = 350;
 const POLL_MAX_COINS: usize = 2;
 
 pub async fn run_book_poll(state: std::sync::Arc<AppState>) {
@@ -202,19 +202,24 @@ pub async fn run_book_poll(state: std::sync::Arc<AppState>) {
                 continue;
             }
             last_poll.insert(coin.clone(), now);
-            match state
-                .rest
-                .post_json::<crate::hl::types::HlBook>(&serde_json::json!({
-                    "type": "l2Book", "coin": coin
-                }))
-                .await
-            {
-                Ok(b) => state.process_book(&b),
-                Err(e) => {
-                    tracing::debug!(coin = %coin, "l2Book poll failed: {e}");
-                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            // fire-and-forget: the REST round-trip must not throttle the
+            // polling cadence (an awaited inline request limits us to
+            // ~1/RTT polls per second instead of the 450 ms budget)
+            let st = state.clone();
+            tokio::spawn(async move {
+                match st
+                    .rest
+                    .post_json_nolock::<crate::hl::types::HlBook>(&serde_json::json!({
+                        "type": "l2Book", "coin": coin
+                    }))
+                    .await
+                {
+                    Ok(b) => st.process_book(&b),
+                    Err(e) => {
+                        tracing::debug!("l2Book poll failed: {e}");
+                    }
                 }
-            }
+            });
         }
     }
 }

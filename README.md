@@ -8,7 +8,7 @@
 
 Onchain Footprint is a realtime order-flow terminal that lets you **look inside every candle across all Hyperliquid perpetuals**. Every trade on Hyperliquid is fully on-chain and attributed to wallets, so the footprint shows *who* is buying and selling, *why* (intent), and *whether those traders are winners or losers*.
 
-- **Bookmap terminal** — a full liquidity-map terminal (`BOOK` tab): live L2 **heatmap** of resting orders (reference ramp `navy → blue → cyan → white → yellow → orange → red` on a log size scale, one column per book snapshot), a **pink price path** with candle-close countdown, dashed **VWAP ±1σ bands**, **trade bubbles** (teal buys / red sells, whale prints venue-tagged `HL`), **gold liquidation diamonds**, a **LIQ LEVELS rail** (green long / red short liquidation levels with LEVEL MAX / CUM MAX), the live **DOM ladder** with depth bars, a cumulative **depth chart**, a **volume profile** with POC/VAH/VAL, a **Δ/CVD strip**, and the radar's magnet levels drawn straight onto the map.
+- **Bookmap terminal** — a full TapeSurf-style liquidity-map terminal (`BOOK` tab): live L2 **heatmap** with split ramps (**asks blue→cyan, bids green→mint**, log size scale, one column per book snapshot), a **yellow stepped price path**, **1m candles** (teal up / red down, auto timeframe), thin-white dashed **VWAP ±1σ**, **dotted wall tracks**, **cyan execution-flash columns**, a bottom **volume histogram**, **trade bubbles** (teal buys / red sells, whale prints venue-tagged `HL`), **gold liquidation diamonds**, a **LIQ LEVELS rail**, the live **DOM ladder** with depth bars, a cumulative **depth chart**, a **volume profile** with POC/VAH/VAL, a **Δ/CVD strip**, and the radar's magnet levels drawn straight onto the map — all framed by a floating TapeSurf-style control card (Heatmap slider, Time tabs, Trades/Candles toggles, Volume total, Profits, book-imbalance bar).
 - **Footprint chart** — per price level inside every candle: taker **SELL × BUY** notional (USD), heat-mapped, with the point-of-control outlined and a per-window delta strip.
 - **Who is trading** — every print carries the **taker and maker wallet** (link straight to Hypurrscan). A 60-minute trader leaderboard ranks wallets by flow with per-wallet buy/sell split and market share.
 - **Intent behind each trade** — fills are classified live as `AGGR` (aggressive open/increase), `LIQ` (liquidation), `DELEV` (deleveraging), `STOP` (realized-loss reduce), `TP` (realized-profit reduce), `HEDGE` (cross-market delta-neutral leg) or `REDUCE`.
@@ -35,27 +35,44 @@ Five sidebar views:
 ### The bookmap terminal (`BOOK` tab)
 
 A bookmap-style liquidity terminal rendered on one canvas, styled after the
-reference liquidity-map screenshots (blue/red resting orders, pink price
-path, LIQ LEVELS rail):
+TapeSurf reference (cool blue/cyan asks above price, green bids below,
+yellow stepped path, candles, bottom tape):
 
 - **Heatmap** — every column is a full L2 book snapshot. Colour encodes resting
   size on a log scale anchored at the **7th→98th percentile** of visible
   levels (tuned from the reference p15/p94: a lower floor keeps the book's
-  body painted, a higher ceiling stops persistent walls from clipping at max)
-  using the reference ramp `navy → blue → cyan → white → yellow → orange →
-  red` (thin `blue` resting orders → walls `red`); the zero colour equals the
-  pane background. The **HEAT** slider slides the colour window along the
-  size axis (left = only the biggest walls, right = lighter liquidity lights
-  up); double-click resets.
-- **Price path** — the traded price traces a **pink** line across the heat
-  (with a dark casing so it reads over bright walls); the axis carries the
-  last-price tag plus an **m:ss candle-close countdown** beneath it.
-- **Session VWAP** — dashed pink **VWAP ±1σ bands** computed as a running
-  USD-weighted mean/variance over the visible prints (toolbar: `VWAP`).
+  body painted, a higher ceiling stops persistent walls from clipping at max).
+  Sides are split like the reference: **asks paint `navy → blue → cyan →
+  white-cyan`, bids paint `dark green → teal → mint → white-green`** (brighter
+  = larger); the zero colour equals the pane background. The **Heatmap**
+  slider slides the colour window along the size axis (left = only the
+  biggest walls, right = lighter liquidity lights up); double-click resets.
+- **Price path** — the traded price traces a **yellow stepped line** across
+  the heat (with a dark casing so it reads over bright walls); the axis
+  carries a green/red **`COIN 75,622`-style price pill** with a yellow
+  underline, plus a grey **VWAP pill**.
+- **Candles** — 1-minute **OHLC candles** (teal up / red down, semi-transparent
+  so the heat reads through) with an auto timeframe (1m / 2m / 5m depending
+  on zoom) built client-side from the print tape (toggle: `Candles Auto`).
+- **Volume histogram** — thin buy/sell bars along the bottom of the plot
+  (teal = buy-dominant, red = sell-dominant, sqrt-scaled; toggle: `BARS`),
+  plus cyan **execution-flash columns** behind the map marking volume bursts
+  and dotted **wall tracks** that follow the biggest resting levels
+  (toggle: `TRAILS`).
+- **Session VWAP** — dashed thin-white **VWAP ±1σ bands** computed as a running
+  USD-weighted mean/variance over the visible prints (card: `VWAP`).
 - **Trade bubbles** — every print lands on the map: teal = market buy, red =
   market sell, radius by USD; whale prints carry the venue tag **`HL`**.
   `LIQ`/`DELEV` prints render as **gold diamonds** with a glow and an
   `HL <size>` label; standalone liquidation events draw gold `HL` rings.
+- **Floating control card** (TapeSurf-style, top-left): live coin + price +
+  spread, the **Heatmap** slider, **Time** tabs (1m / 10m / 30m / 45m),
+  **Trades** toggles (`Bid ● Ask` bubbles, `Candles Auto`, `LIQ`), **Volume
+  Total**, session **Profits** (realized PnL of tracked takers), and a **book
+  ±1% imbalance** bar.
+- **Bottom tape** — two-line time labels in the reference style: `23h 28m ago`
+  over the local clock time (`4:00 PM`); a pulsing **`Vol X · live`** chip
+  marks the streaming print feed at the bottom-right of the heat.
 - **LIQ LEVELS rail** — a right-hand panel in the reference style: estimated
   forced-flow per price row as **green long / red short bars** with
   `LEVEL MAX` / `CUM MAX` stats per side, a `price` tick and a `±8%` domain
@@ -67,14 +84,14 @@ path, LIQ LEVELS rail):
 - **Depth chart** — cumulative bid/ask curves ±1.2% around mid.
 - **Volume profile** — buy/sell histogram of the visible window with
   **POC** and the 70% value area (**VAH/VAL**) on dark backing chips.
-- **Δ/CVD strip** — per-minute taker delta bars with the cumulative-delta line.
+- **Δ/CVD strip** — per-minute taker delta bars with the cumulative-delta line
+  (off by default, like the reference).
 - **Radar overlay** — armed/engaged magnet levels as dashed lines with
   estimated forced-flow labels.
 - **Interaction** — scroll to zoom time, hover for a price/time/level-size
-  readout, toolbar toggles for every panel, range presets ~3m…~45m, and
+  readout, card toggles for every panel, range presets 1m…45m, and
   **RECENTER** to jump back to the live edge (default zoom, auto price fit,
-  neutral heat). A pulsing **`live trades`** chip marks the streaming print
-  feed at the bottom-right of the heat.
+  neutral heat).
 
 Book data pipeline: the coin you watch is subscribed to Hyperliquid's
 `l2Book` WS channel *and* polled over REST (~2 Hz) to densify the map (the
@@ -84,8 +101,8 @@ into a ~48-minute column ring per coin and streamed to the browser.
 **Warm-up & density** — the map is a history, not an instant snapshot: a
 heat column lands every 400 ms, so the plot fills in over time and a
 *longer warm-up means a denser map* (more resting bands toured by price,
-more prints, richer percentiles). The default view is the **~24m** range
-preset (3,600 columns); zoom out to **~45m** once the ring has filled
+more prints, richer percentiles). The default view is the **30m** range
+preset (4,500 columns); zoom out to **45m** once the ring has filled
 (~30–48 min of watching). The initial REST seed carries up to 6,000
 columns so a page refresh keeps the full accumulated history, and the
 percentile anchors are recomputed live over the visible window — the

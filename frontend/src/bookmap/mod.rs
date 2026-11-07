@@ -12,53 +12,140 @@ use std::collections::VecDeque;
 use shared::{
     BookCol, BookPayload, FootWindow, Intent, LevelState, LiveLiquidation, LiveTrade,
 };
-use wasm_bindgen::JsCast;
+use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
 
 use crate::ui::{fmt_k, fmt_px, ms_hm};
 
-/// time-axis label: seconds when the step is finer than a minute
-fn time_label(t: i64, step_ms: f64) -> String {
-    if step_ms < 60_000.0 {
-        let s = (t / 1000) % 60;
-        format!("{}:{:02}", ms_hm(t), s)
+/// thousands-separated integer price for the right-edge pills (75622 -> 75,622)
+fn fmt_comma(v: f64) -> String {
+    if v >= 1000.0 {
+        let n = v.round() as i64;
+        let s = n.to_string();
+        let bytes = s.as_bytes();
+        let mut out = String::with_capacity(bytes.len() + 4);
+        for (i, c) in bytes.iter().enumerate() {
+            if i > 0 && (bytes.len() - i) % 3 == 0 {
+                out.push(',');
+            }
+            out.push(*c as char);
+        }
+        out
     } else {
-        ms_hm(t)
+        fmt_px(v)
     }
+}
+
+/// "23h 28m ago" / "5m ago" / "42s ago"
+fn fmt_ago(ms: i64) -> String {
+    let s = ms.max(0) / 1000;
+    if s < 60 {
+        format!("{}s ago", s)
+    } else if s < 3600 {
+        format!("{}m ago", s / 60)
+    } else {
+        format!("{}h {}m ago", s / 3600, (s % 3600) / 60)
+    }
+}
+
+/// local 12-hour clock time ("4:00 PM") via the JS Date
+fn clock12(t: i64) -> String {
+    let d = js_sys::Date::new(&JsValue::from_f64(t as f64));
+    let h24 = d.get_hours();
+    let m = d.get_minutes();
+    let ampm = if h24 < 12 { "AM" } else { "PM" };
+    let h12 = match h24 % 12 {
+        0 => 12,
+        h => h,
+    };
+    format!("{}:{:02} {}", h12, m, ampm)
+}
+
+/// filled rounded rectangle (TapeSurf pill)
+fn rounded_rect(
+    ctx: &CanvasRenderingContext2d,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    r: f64,
+    fill: &str,
+) {
+    let r = r.min(w / 2.0).min(h / 2.0);
+    ctx.begin_path();
+    ctx.move_to(x + r, y);
+    ctx.line_to(x + w - r, y);
+    let _ = ctx.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
+    ctx.line_to(x + w, y + h - r);
+    let _ = ctx.arc(x + w - r, y + h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
+    ctx.line_to(x + r, y + h);
+    let _ = ctx.arc(
+        x + r,
+        y + h - r,
+        r,
+        std::f64::consts::FRAC_PI_2,
+        std::f64::consts::PI,
+    );
+    ctx.line_to(x, y + r);
+    let _ = ctx.arc(x + r, y + r, r, std::f64::consts::PI, std::f64::consts::PI * 1.5);
+    ctx.close_path();
+    ctx.set_fill_style_str(fill);
+    let _ = ctx.fill();
 }
 
 // ---------------------------------------------------------------------------
 // colour ramp (log-normalized resting size → bookmap heat)
 // ---------------------------------------------------------------------------
 
-/// reference-terminal ramp (dark): navy -> blue -> cyan -> white ->
-/// yellow -> orange -> red; the zero colour equals the pane background.
-const RAMP: [&str; 16] = [
-    "#050f1f",
-    "#071c35",
-    "#08294a",
-    "#0a3660",
-    "#0c4979",
-    "#105e94",
-    "#1373b0",
-    "#3090c7",
-    "#57b0db",
-    "#7fd0f0",
-    "#cdedfa",
-    "#f8f2c3",
-    "#ffe14a",
-    "#ffa719",
-    "#f76909",
-    "#e8281c",
+/// TapeSurf-style ask ramp (above price): navy -> blue -> cyan -> white;
+/// the zero colour equals the pane background.
+const RAMP_ASK: [&str; 14] = [
+    "#070d18",
+    "#081a30",
+    "#0a2544",
+    "#0c3358",
+    "#0e446e",
+    "#105a8a",
+    "#1373a6",
+    "#2b93c2",
+    "#54b6da",
+    "#84d6ea",
+    "#b4e9f5",
+    "#dcf7fb",
+    "#eefbff",
+    "#f6feff",
 ];
 
-fn ramp(v: f64) -> &'static str {
-    let i = ((v * 15.0).floor() as i32).clamp(0, 15) as usize;
-    RAMP[i]
+/// bid ramp (below price): dark green -> teal -> white-green
+const RAMP_BID: [&str; 14] = [
+    "#06110d",
+    "#071f16",
+    "#082b1e",
+    "#0a3d29",
+    "#0c5035",
+    "#0f6843",
+    "#128353",
+    "#2aa36c",
+    "#53c289",
+    "#83dcab",
+    "#b3ecc9",
+    "#dbf8e6",
+    "#eefdf4",
+    "#f6fff9",
+];
+
+fn ramp_ask(v: f64) -> &'static str {
+    let i = ((v * 13.0).floor() as i32).clamp(0, 13) as usize;
+    RAMP_ASK[i]
 }
 
-const BG: &str = "#050f1f";
-const GRID: &str = "#0b1a30";
+fn ramp_bid(v: f64) -> &'static str {
+    let i = ((v * 13.0).floor() as i32).clamp(0, 13) as usize;
+    RAMP_BID[i]
+}
+
+const BG: &str = "#070d16";
+const GRID: &str = "#0e1a28";
 
 // ---------------------------------------------------------------------------
 // heat window anchors — tuned for a DENSE map
@@ -76,22 +163,28 @@ const GRID: &str = "#0b1a30";
 const HEAT_PLO: f64 = 0.07;
 const HEAT_PHI: f64 = 0.98;
 const HEAT_MIN_RATIO: f64 = 1.5;
-/// default zoom window in columns — 3600 × 400 ms = 24 min of heat (the
-/// `~24m` range preset), so a long warm-up is actually shown as one dense
+/// default zoom window in columns — 4500 × 400 ms = 30 min of heat (the
+/// `30m` range preset), so a long warm-up shows as one dense TapeSurf-style
 /// map; zoom out to ~45m (6800) for the full retained history
-const DEF_VIS_COLS: usize = 3_600;
+const DEF_VIS_COLS: usize = 4_500;
 const C_DIM: &str = "#5b6b80";
 const C_TXT: &str = "#c9d6e4";
 const BUY: &str = "#1fe3a6";
 const SELL: &str = "#ff4d6a";
 const LIQ: &str = "#ffd24a";
 const C_VA: &str = "#e879f9";
-/// price-path line + session VWAP (screenshot pink)
-const PINK: &str = "#ff4fd0";
-const VWAP: &str = "#ff8fe0";
+/// stepped traded-price path (TapeSurf signature yellow)
+const YELLOW: &str = "#ffe14d";
+/// 1m candles: teal-green up, red down
+const CANDLE_UP: &str = "#17d3a1";
+const CANDLE_DN: &str = "#ff4d5e";
+/// session VWAP line (thin white, like the reference terminal)
+const VWAP: &str = "#cdd8e2";
 
 const FONT: &str = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
 const FONT_B: &str = "bold 10px ui-monospace, SFMono-Regular, Menlo, monospace";
+/// 9px bold for the right-edge price pills (keeps them inside the axis)
+const FONT_P: &str = "bold 9px ui-monospace, SFMono-Regular, Menlo, monospace";
 
 /// full rebuild cadence: keeps the shifted image crisp
 const REBUILD_EVERY_MS: f64 = 8_000.0;
@@ -120,6 +213,18 @@ pub struct BookView {
     pub show_radar: bool,
     pub show_delta: bool,
     pub show_vwap: bool,
+    /// 1m candles overlay (TapeSurf-style teal/red)
+    pub show_candles: bool,
+    /// bottom volume histogram strip
+    pub show_volume: bool,
+    /// dotted wall tracks (biggest resting walls per column)
+    pub show_trails: bool,
+    /// stats for the HTML overlay panel (computed during draw)
+    pub vol_total: f64,
+    pub profit: f64,
+    pub px_now: f64,
+    pub spr_bps: f64,
+    pub imb: f64,
     pub hover: Option<(f64, f64)>,
     pub px_lo: f64,
     pub px_hi: f64,
@@ -145,8 +250,16 @@ impl Default for BookView {
             show_profile: true,
             show_dom: true,
             show_radar: true,
-            show_delta: true,
+            show_delta: false,
             show_vwap: true,
+            show_candles: true,
+            show_volume: true,
+            show_trails: true,
+            vol_total: 0.0,
+            profit: 0.0,
+            px_now: 0.0,
+            spr_bps: 0.0,
+            imb: 0.5,
             hover: None,
             px_lo: 0.0,
             px_hi: 0.0,
@@ -403,10 +516,10 @@ pub fn draw(
     ctx.fill_rect(0.0, 0.0, cw, ch);
 
     // ----- layout ---------------------------------------------------------
-    let top_h = 26.0;
-    let time_h = 18.0;
+    let top_h = 8.0;
+    let time_h = 32.0;
     let delta_h = if bv.show_delta { 54.0 } else { 0.0 };
-    let axis_w = 62.0;
+    let axis_w = 70.0;
     let liq_w = if bv.show_radar { 78.0 } else { 0.0 };
     let prof_w = if bv.show_profile { 86.0 } else { 0.0 };
     let dom_w = if bv.show_dom { (cw * 0.19).clamp(170.0, 300.0) } else { 0.0 };
@@ -615,9 +728,40 @@ pub fn draw(
     // ----- grid + axes ------------------------------------------------------
     draw_grid_and_axes(&ctx, &lay, px_lo, px_hi, &bv.cols, skip, vis_n, col_w);
 
-    // ----- session VWAP with bands (screenshot pink) ------------------------
+    // ----- candles + volume (TapeSurf-style) ---------------------------------
+    let span_ms = vis_n as f64 * 400.0;
+    let candle_ms: i64 = if span_ms <= 8.0 * 60_000.0 {
+        60_000
+    } else if span_ms <= 25.0 * 60_000.0 {
+        120_000
+    } else {
+        300_000
+    };
+    let cnds = build_candles(&trades_all, first_t, candle_ms);
+    bv.vol_total = cnds.iter().map(|c| c.buy + c.sell).sum();
+    bv.profit = trades_all
+        .iter()
+        .filter(|t| t.t >= first_t)
+        .map(|t| t.rpn)
+        .sum();
+    if let Some(b) = bv.cur.as_ref() {
+        bv.px_now = b.mid();
+        bv.spr_bps = b.spread_bps();
+        let (b1, a1) = book_totals(b, 0.01);
+        let tot = b1 + a1;
+        bv.imb = if tot > 0.0 { b1 / tot } else { 0.5 };
+    }
+    // cyan execution-flash columns behind everything
+    draw_flashes(&ctx, &lay, &cnds, &t2x, candle_ms, col_w);
+    // dotted wall tracks (biggest resting walls per column)
+    if bv.show_trails {
+        draw_wall_tracks(&ctx, &bv.cols, &lay, skip, vis_n, col_w, &p2y);
+    }
+
+    // ----- session VWAP (thin white) ----------------------------------------
+    let mut vwap_tag: Option<(f64, f64)> = None;
     if bv.show_vwap {
-        draw_vwap(&ctx, &lay, &trades_all, first_t, &p2y, &t2x);
+        vwap_tag = draw_vwap(&ctx, &lay, &trades_all, first_t, &p2y, &t2x);
     }
 
     // ----- radar magnet levels ----------------------------------------------
@@ -627,7 +771,7 @@ pub fn draw(
         }
     }
 
-    // ----- price line (last print per column) --------------------------------
+    // ----- stepped traded-price path (TapeSurf yellow) ------------------------
     let mut last_px_seen = 0.0_f64;
     {
         let mut pts: Vec<(f64, f64)> = Vec::new();
@@ -651,64 +795,89 @@ pub fn draw(
             pts.push((last_x, p2y(last_px)));
         }
         if pts.len() >= 2 {
-            // dark casing under the pink path so it reads over bright heat
-            ctx.set_line_join("round");
-            ctx.set_stroke_style_str("rgba(5,10,20,0.6)");
-            ctx.set_line_width(3.4);
-            ctx.begin_path();
-            for (i, (x, y)) in pts.iter().enumerate() {
-                if i == 0 {
-                    ctx.move_to(*x, *y);
-                } else {
-                    ctx.line_to(*x, *y);
+            // dark casing under the yellow steps so it reads over bright heat
+            let step = |col: &str, wd: f64| {
+                ctx.set_line_join("miter");
+                ctx.set_line_cap("butt");
+                ctx.set_stroke_style_str(col);
+                ctx.set_line_width(wd);
+                ctx.begin_path();
+                let (x0, mut cy) = pts[0];
+                ctx.move_to(x0, cy);
+                for &(x, y) in pts.iter().skip(1) {
+                    ctx.line_to(x, cy);
+                    ctx.line_to(x, y);
+                    cy = y;
                 }
-            }
-            ctx.stroke();
-            ctx.set_stroke_style_str(PINK);
-            ctx.set_line_width(1.5);
-            ctx.begin_path();
-            for (i, (x, y)) in pts.iter().enumerate() {
-                if i == 0 {
-                    ctx.move_to(*x, *y);
-                } else {
-                    ctx.line_to(*x, *y);
-                }
-            }
-            ctx.stroke();
+                ctx.stroke();
+            };
+            step("rgba(6,10,18,0.65)", 3.2);
+            step(YELLOW, 1.5);
         }
     }
-    // last price tag on the axis
-    if last_px_seen > 0.0 {
-        let y = p2y(last_px_seen);
+
+    // ----- candles on top of the path ---------------------------------------
+    if bv.show_candles {
+        draw_candles(&ctx, &lay, &cnds, &p2y, &t2x, candle_ms, col_w);
+    }
+
+    // ----- right-edge pills (TapeSurf price tags) ---------------------------
+    let price_pill_y: Option<f64> = if last_px_seen > 0.0 {
+        let y = p2y(last_px_seen).clamp(lay.y + 9.0, lay.y + lay.h - 9.0);
         let up = trades_all
             .iter()
             .rev()
             .find(|t| t.t >= first_t)
             .map(|t| t.side.is_buy())
             .unwrap_or(true);
-        ctx.set_fill_style_str(if up { BUY } else { SELL });
-        ctx.fill_rect(lay.axis_x + 1.0, y - 7.5, lay.axis_w - 2.0, 15.0);
-        ctx.set_fill_style_str("#04110c");
-        ctx.set_font(FONT_B);
+        let txt = format!("{} {}", bv.coin, fmt_comma(last_px_seen));
+        let w = (txt.len() as f64 * 5.6 + 10.0).min(lay.axis_w);
+        let px = lay.axis_x + 1.0;
+        rounded_rect(&ctx, px, y - 8.0, w, 16.0, 4.0, if up { BUY } else { SELL });
+        // yellow underline, TapeSurf-style
+        ctx.set_fill_style_str(YELLOW);
+        ctx.fill_rect(px + 1.0, y + 8.0, w - 2.0, 1.6);
+        ctx.set_fill_style_str("#04150d");
+        ctx.set_font(FONT_P);
         ctx.set_text_align("center");
-        let _ = ctx.fill_text(&fmt_px(last_px_seen), lay.axis_x + lay.axis_w / 2.0, y + 3.5);
+        let _ = ctx.fill_text(&txt, px + w / 2.0, y + 3.0);
         ctx.set_text_align("left");
-        // candle-close countdown under the tag (next 1m boundary);
-        // flips above the tag when the tag sits near the plot bottom
-        let rem_ms = 60_000 - (js_sys::Date::now() as i64).rem_euclid(60_000);
-        let cd = format!("{}:{:02}", rem_ms / 60_000, (rem_ms % 60_000) / 1_000);
-        let below = y + 22.0 <= lay.y + lay.h;
-        let cy = if below { y + 8.0 } else { y - 21.0 };
-        ctx.set_fill_style_str("rgba(8,16,28,0.94)");
-        ctx.fill_rect(lay.axis_x + 2.0, cy, lay.axis_w - 4.0, 13.0);
-        ctx.set_stroke_style_str("rgba(30,48,70,0.8)");
-        ctx.set_line_width(1.0);
-        ctx.stroke_rect(lay.axis_x + 2.0, cy, lay.axis_w - 4.0, 13.0);
-        ctx.set_fill_style_str(if up { "#9defd4" } else { "#ffb3c0" });
-        ctx.set_font(FONT);
-        ctx.set_text_align("center");
-        let _ = ctx.fill_text(&cd, lay.axis_x + lay.axis_w / 2.0, cy + 9.5);
-        ctx.set_text_align("left");
+        Some(y)
+    } else {
+        None
+    };
+    if let Some((vy, vval)) = vwap_tag {
+        if vy > lay.y + 10.0 && vy < lay.y + lay.h - 10.0 {
+            // de-conflict with the price pill: shift by ±22px when stacked
+            let mut py = vy;
+            if let Some(pry) = price_pill_y {
+                if (vy - pry).abs() < 20.0 {
+                    py = if pry - 22.0 > lay.y + 10.0 {
+                        pry - 22.0
+                    } else {
+                        pry + 22.0
+                    };
+                }
+            }
+            let txt = fmt_comma(vval);
+            let w = (txt.len() as f64 * 5.6 + 9.0).min(lay.axis_w);
+            let px = lay.axis_x + 1.0;
+            rounded_rect(&ctx, px, py - 7.0, w, 14.0, 4.0, "#2a3644");
+            ctx.set_fill_style_str("#d7e2ec");
+            ctx.set_font(FONT_P);
+            ctx.set_text_align("center");
+            let _ = ctx.fill_text(&txt, px + w / 2.0, py + 3.0);
+            ctx.set_text_align("left");
+            // thin leader from the pill back to the true VWAP row
+            if (py - vy).abs() > 2.0 {
+                ctx.set_stroke_style_str("rgba(205,216,226,0.4)");
+                ctx.set_line_width(1.0);
+                ctx.begin_path();
+                ctx.move_to(px + 2.0, py);
+                ctx.line_to(px + 2.0, vy);
+                ctx.stroke();
+            }
+        }
     }
 
     // ----- trade bubbles -----------------------------------------------------
@@ -812,6 +981,11 @@ pub fn draw(
         }
     }
 
+    // ----- volume histogram strip (TapeSurf bottom bars) ----------------------
+    if bv.show_volume {
+        draw_volume_strip(&ctx, &lay, &cnds, &t2x, candle_ms, col_w);
+    }
+
     // ----- volume profile -----------------------------------------------------
     if bv.show_profile && lay.prof_w > 8.0 {
         draw_profile(&ctx, &lay, &trades_all, first_t, px_lo, px_hi, &p2y);
@@ -880,10 +1054,12 @@ pub fn draw(
         }
     }
 
-    // ----- live-trades chip (bottom-right of the heat, clear of the panels) ----
+    // ----- live-volume chip (bottom-right of the heat, clear of the panels) ----
     {
         let pulse = 0.5 + 0.5 * ((js_sys::Date::now() / 700.0).sin());
-        let cx = lay.x + lay.w - 62.0;
+        let label = format!("Vol {} · live", fmt_k(bv.vol_total));
+        let tw = label.len() as f64 * 5.4;
+        let cx = (lay.x + lay.w - tw - 18.0).max(lay.x + 40.0);
         let cy = lay.y + lay.h - 12.0;
         ctx.set_fill_style_str(&format!("rgba(52,240,160,{:.2})", 0.35 + 0.6 * pulse));
         ctx.begin_path();
@@ -892,10 +1068,9 @@ pub fn draw(
         ctx.set_fill_style_str("rgba(205,225,240,0.85)");
         ctx.set_font("9px ui-monospace, SFMono-Regular, Menlo, monospace");
         ctx.set_text_align("left");
-        let _ = ctx.fill_text("live trades", cx + 7.0, cy + 3.0);
+        let _ = ctx.fill_text(&label, cx + 7.0, cy + 3.0);
     }
 
-    draw_status(&ctx, bv, cw, first_t, vis_n);
     bv.frame_ms = js_sys::Date::now() - t0;
 }
 
@@ -916,7 +1091,7 @@ fn draw_column(
 ) {
     let lg_lo = wlo.ln();
     let lg_span = (whi.ln() - lg_lo).max(0.001);
-    for side in [&col.bids, &col.asks] {
+    for (is_bid, side) in [(true, &col.bids), (false, &col.asks)] {
         if side.len() < 2 {
             continue;
         }
@@ -948,7 +1123,11 @@ fn draw_column(
             let y0 = y_hi.max(-2.0);
             let y1 = y_lo.min(lay.h + 2.0);
             let h = (y1 - y0).max(1.0);
-            ctx.set_fill_style_str(ramp(v));
+            ctx.set_fill_style_str(if is_bid {
+                ramp_bid(v)
+            } else {
+                ramp_ask(v)
+            });
             ctx.fill_rect(x, y0, col_w + 0.6, h);
         }
     }
@@ -1000,16 +1179,16 @@ fn draw_grid_and_axes(
         let _ = ctx.fill_text(&fmt_px(p), lay.axis_x + 3.0, y + 3.5);
         p += step;
     }
-    // time axis — labels on the column grid (uniform spacing), seconds
-    // shown when the per-label span is under a minute
-    let step_cols = ((80.0 / col_w).ceil() as usize).max(1);
-    let approx_ms = step_cols as f64 * 400.0;
+    // time axis — labels on the column grid (uniform spacing):
+    // "Xh Ym ago" + local clock time underneath (TapeSurf-style tape)
+    let step_cols = ((86.0 / col_w).ceil() as usize).max(1);
     ctx.set_font(FONT);
+    let now_ms = js_sys::Date::now() as i64;
     let mut i = 0usize;
     while i < vis_n {
         let c = &cols[skip + i];
         let x = lay.w - (vis_n - i) as f64 * col_w;
-        if x > lay.x + 26.0 && x < lay.x + lay.w - 26.0 {
+        if x > lay.x + 34.0 && x < lay.x + lay.w - 34.0 {
             ctx.set_stroke_style_str(GRID);
             ctx.begin_path();
             ctx.move_to(x, lay.y);
@@ -1017,7 +1196,9 @@ fn draw_grid_and_axes(
             ctx.stroke();
             ctx.set_fill_style_str(C_DIM);
             ctx.set_text_align("center");
-            let _ = ctx.fill_text(&time_label(c.t, approx_ms), x, lay.time_y + 13.0);
+            let _ = ctx.fill_text(&fmt_ago(now_ms - c.t), x, lay.time_y + 11.0);
+            ctx.set_fill_style_str("#46586c");
+            let _ = ctx.fill_text(&clock12(c.t), x, lay.time_y + 24.0);
         }
         i += step_cols;
     }
@@ -1046,8 +1227,9 @@ fn draw_grid_and_axes(
     ctx.stroke();
 }
 
-/// Session VWAP with ±1σ bands (pink, like the reference screenshots):
-/// running USD-weighted mean and variance over the visible prints.
+/// Session VWAP with ±1σ bands (thin white line, like the reference
+/// terminal): running USD-weighted mean and variance over the visible
+/// prints. Returns `(y, vwap)` at the right edge for the price pill.
 fn draw_vwap(
     ctx: &CanvasRenderingContext2d,
     lay: &Lay,
@@ -1055,13 +1237,13 @@ fn draw_vwap(
     first_t: i64,
     p2y: &dyn Fn(f64) -> f64,
     t2x: &dyn Fn(i64) -> f64,
-) {
+) -> Option<(f64, f64)> {
     let _ = lay;
     let mut sum_w = 0.0_f64;
     let mut sum_wp = 0.0_f64;
     let mut sum_wp2 = 0.0_f64;
     // (x, vwap_y, +σ_y, -σ_y)
-    let mut band: Vec<(f64, f64, f64, f64)> = Vec::new();
+    let mut band: Vec<(f64, f64, f64, f64, f64)> = Vec::new();
     let mut last_x = -2.0_f64;
     for t in trades.iter() {
         if t.t < first_t || t.px <= 0.0 || t.usd <= 0.0 {
@@ -1078,46 +1260,47 @@ fn draw_vwap(
         let sig = var.sqrt();
         let x = t2x(t.t);
         if x - last_x >= 2.0 {
-            band.push((x, p2y(vwap), p2y(vwap + sig), p2y(vwap - sig)));
+            band.push((x, p2y(vwap), p2y(vwap + sig), p2y(vwap - sig), vwap));
             last_x = x;
         }
     }
     if band.len() < 2 {
-        return;
+        return None;
     }
     // band fill
-    ctx.set_fill_style_str("rgba(255,79,208,0.14)");
+    ctx.set_fill_style_str("rgba(205,216,226,0.07)");
     ctx.begin_path();
-    let (x0, _, up0, _) = band[0];
+    let (x0, _, up0, _, _) = band[0];
     ctx.move_to(x0, up0);
-    for (x, _, up, _) in band.iter() {
+    for (x, _, up, _, _) in band.iter() {
         ctx.line_to(*x, *up);
     }
-    for (x, _, _, dn) in band.iter().rev() {
+    for (x, _, _, dn, _) in band.iter().rev() {
         ctx.line_to(*x, *dn);
     }
     ctx.close_path();
     let _ = ctx.fill();
     // vwap line
     ctx.set_stroke_style_str(VWAP);
-    ctx.set_line_width(1.4);
+    ctx.set_line_width(1.0);
     dash(ctx, true, 5.0, 4.0);
     ctx.begin_path();
-    let (x0, v0, _, _) = band[0];
+    let (x0, v0, _, _, _) = band[0];
     ctx.move_to(x0, v0);
-    for (x, v, _, _) in band.iter() {
+    for (x, v, _, _, _) in band.iter() {
         ctx.line_to(*x, *v);
     }
     ctx.stroke();
     dash(ctx, false, 0.0, 0.0);
     // right-edge label
-    let (lx, _, lv, _) = *band.last().unwrap();
+    let (lx, _, lv, _, lval) = *band.last().unwrap();
     ctx.set_font(FONT_B);
     ctx.set_fill_style_str(VWAP);
     ctx.set_text_align("right");
     let _ = ctx.fill_text("VWAP", lx - 3.0, lv - 4.0);
     ctx.set_text_align("left");
     ctx.set_font(FONT);
+    Some((lv, lval))
 }
 
 fn draw_radar(
@@ -1694,8 +1877,266 @@ fn draw_status(ctx: &CanvasRenderingContext2d, bv: &BookView, cw: f64, first_t: 
 }
 
 // ---------------------------------------------------------------------------
-// input helpers (called from lib.rs)
+// TapeSurf-style overlays: candles, volume bars, execution flashes, wall trails
 // ---------------------------------------------------------------------------
+
+/// one aggregated candle bucket (built client-side from the print tape)
+struct Cnd {
+    t0: i64,
+    o: f64,
+    h: f64,
+    l: f64,
+    c: f64,
+    buy: f64,
+    sell: f64,
+}
+
+fn build_candles(trades: &[&LiveTrade], first_t: i64, bucket_ms: i64) -> Vec<Cnd> {
+    let mut ts: Vec<&LiveTrade> = trades
+        .iter()
+        .filter(|t| t.t >= first_t && t.px > 0.0)
+        .copied()
+        .collect();
+    ts.sort_by_key(|t| t.t);
+    let mut out: Vec<Cnd> = Vec::new();
+    for t in ts {
+        let t0 = t.t.div_euclid(bucket_ms) * bucket_ms;
+        let (buy, sell) = if t.side.is_buy() {
+            (t.usd, 0.0)
+        } else {
+            (0.0, t.usd)
+        };
+        match out.last_mut() {
+            Some(c) if c.t0 == t0 => {
+                c.h = c.h.max(t.px);
+                c.l = c.l.min(t.px);
+                c.c = t.px;
+                c.buy += buy;
+                c.sell += sell;
+            }
+            _ => out.push(Cnd {
+                t0,
+                o: t.px,
+                h: t.px,
+                l: t.px,
+                c: t.px,
+                buy,
+                sell,
+            }),
+        }
+    }
+    out
+}
+
+fn draw_candles(
+    ctx: &CanvasRenderingContext2d,
+    lay: &Lay,
+    cnds: &[Cnd],
+    p2y: &dyn Fn(f64) -> f64,
+    t2x: &dyn Fn(i64) -> f64,
+    candle_ms: i64,
+    col_w: f64,
+) {
+    let candle_cols = (candle_ms / 400).max(1) as f64;
+    let body_w = (candle_cols * col_w * 0.62).clamp(2.0, 9.0);
+    for c in cnds {
+        let xc = t2x(c.t0 + candle_ms / 2);
+        if xc < lay.x - 8.0 || xc > lay.x + lay.w + 8.0 {
+            continue;
+        }
+        let yh = p2y(c.h);
+        let yl = p2y(c.l);
+        let yo = p2y(c.o);
+        let yc = p2y(c.c);
+        if yh < lay.y - 30.0 || yl > lay.y + lay.h + 30.0 {
+            continue;
+        }
+        let up = c.c >= c.o;
+        let col = if up { CANDLE_UP } else { CANDLE_DN };
+        // wick
+        ctx.set_stroke_style_str(col);
+        ctx.set_line_width(1.0);
+        ctx.begin_path();
+        ctx.move_to(xc, yh);
+        ctx.line_to(xc, yl);
+        ctx.stroke();
+        // body (semi-transparent so the heat reads through)
+        let by0 = yo.min(yc);
+        let bh = (yc - yo).abs().max(1.2);
+        ctx.set_fill_style_str(if up {
+            "rgba(23,211,161,0.82)"
+        } else {
+            "rgba(255,77,94,0.82)"
+        });
+        ctx.fill_rect(xc - body_w / 2.0, by0, body_w, bh);
+        ctx.set_stroke_style_str(if up {
+            "rgba(23,211,161,0.95)"
+        } else {
+            "rgba(255,77,94,0.95)"
+        });
+        ctx.set_line_width(0.8);
+        ctx.stroke_rect(xc - body_w / 2.0, by0, body_w, bh);
+        let _ = col;
+    }
+}
+
+/// thin volume histogram along the bottom of the plot (red / teal bars)
+fn draw_volume_strip(
+    ctx: &CanvasRenderingContext2d,
+    lay: &Lay,
+    cnds: &[Cnd],
+    t2x: &dyn Fn(i64) -> f64,
+    candle_ms: i64,
+    col_w: f64,
+) {
+    if cnds.is_empty() {
+        return;
+    }
+    let strip_h = 34.0_f64;
+    let base_y = lay.y + lay.h;
+    let candle_cols = (candle_ms / 400).max(1) as f64;
+    let bar_w = (candle_cols * col_w * 0.62).clamp(1.6, 9.0);
+    let max_vol = cnds
+        .iter()
+        .map(|c| c.buy + c.sell)
+        .fold(1e-9_f64, f64::max);
+    let max_sq = max_vol.sqrt();
+    for c in cnds {
+        let xc = t2x(c.t0 + candle_ms / 2);
+        if xc < lay.x - 8.0 || xc > lay.x + lay.w + 8.0 {
+            continue;
+        }
+        let vol = c.buy + c.sell;
+        if vol <= 0.0 {
+            continue;
+        }
+        let bh = (vol.sqrt() / max_sq * strip_h).max(1.0);
+        ctx.set_fill_style_str(if c.buy >= c.sell {
+            "rgba(23,211,161,0.55)"
+        } else {
+            "rgba(255,77,94,0.55)"
+        });
+        ctx.fill_rect(xc - bar_w / 2.0, base_y - bh, bar_w, bh);
+    }
+    // baseline
+    ctx.set_stroke_style_str("rgba(120,140,160,0.25)");
+    ctx.set_line_width(1.0);
+    ctx.begin_path();
+    ctx.move_to(lay.x, base_y - 0.5);
+    ctx.line_to(lay.x + lay.w, base_y - 0.5);
+    ctx.stroke();
+}
+
+/// cyan execution-flash columns behind the overlays (volume bursts)
+fn draw_flashes(
+    ctx: &CanvasRenderingContext2d,
+    lay: &Lay,
+    cnds: &[Cnd],
+    t2x: &dyn Fn(i64) -> f64,
+    candle_ms: i64,
+    col_w: f64,
+) {
+    if cnds.len() < 6 {
+        return;
+    }
+    let mut vols: Vec<f64> = cnds.iter().map(|c| c.buy + c.sell).collect();
+    vols.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p85 = vols[((vols.len() as f64 - 1.0) * 0.85) as usize].max(1.0);
+    let max_vol = vols.last().copied().unwrap_or(1.0).max(1.0);
+    let candle_cols = (candle_ms / 400).max(1) as f64;
+    let w = (candle_cols * col_w * 0.9).max(2.0);
+    for c in cnds {
+        let vol = c.buy + c.sell;
+        if vol < p85 {
+            continue;
+        }
+        let xc = t2x(c.t0 + candle_ms / 2);
+        if xc < lay.x - w || xc > lay.x + lay.w + w {
+            continue;
+        }
+        let norm = ((vol / max_vol) - 0.6).max(0.0) / 0.4;
+        let alpha = 0.05 + 0.11 * norm;
+        ctx.set_fill_style_str(&format!("rgba(53,216,230,{:.3})", alpha));
+        ctx.fill_rect(xc - w / 2.0, lay.y, w, lay.h);
+    }
+}
+
+fn max_level(side: &[shared::BookLevel]) -> (f64, f64) {
+    let mut best = (0.0_f64, 0.0_f64);
+    for l in side {
+        let usd = l.px * l.sz;
+        if usd > best.0 {
+            best = (usd, l.px);
+        }
+    }
+    best
+}
+
+/// dotted trails that follow the biggest resting walls across columns
+fn draw_wall_tracks(
+    ctx: &CanvasRenderingContext2d,
+    cols: &VecDeque<BookCol>,
+    lay: &Lay,
+    skip: usize,
+    vis_n: usize,
+    col_w: f64,
+    p2y: &dyn Fn(f64) -> f64,
+) {
+    let stride = (vis_n / 420).max(1);
+    // sampled (x, bid_max(usd,px), ask_max(usd,px)) per column
+    let mut samples: Vec<(f64, (f64, f64), (f64, f64))> = Vec::new();
+    let mut i = 0usize;
+    while i < vis_n {
+        let c = &cols[skip + i];
+        let x = lay.w - (vis_n - i) as f64 * col_w;
+        samples.push((x, max_level(&c.bids), max_level(&c.asks)));
+        i += stride;
+    }
+    if samples.len() < 12 {
+        return;
+    }
+    // per-side dotted trail: threshold = p92 of the sampled max sizes
+    let draw_side = |get: &dyn Fn(&(f64, (f64, f64), (f64, f64))) -> (f64, f64),
+                     col: &str| {
+        let mut vols: Vec<f64> = samples.iter().map(|s| get(s).0).collect();
+        vols.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let thr = vols[((vols.len() as f64 - 1.0) * 0.92) as usize].max(1.0);
+        ctx.set_stroke_style_str(col);
+        ctx.set_line_width(1.0);
+        dash(ctx, true, 1.5, 2.5);
+        let mut last: Option<(f64, f64)> = None;
+        for s in samples.iter() {
+            let (usd, px) = get(s);
+            if usd < thr || px <= 0.0 {
+                last = None;
+                continue;
+            }
+            let y = p2y(px);
+            if y < lay.y - 4.0 || y > lay.y + lay.h + 4.0 {
+                last = None;
+                continue;
+            }
+            let x = s.0;
+            if let Some((lx, ly)) = last {
+                if (ly - y).abs() < 2.5 {
+                    ctx.begin_path();
+                    ctx.move_to(lx, ly);
+                    ctx.line_to(x, y);
+                    ctx.stroke();
+                }
+            }
+            ctx.set_fill_style_str(col);
+            ctx.begin_path();
+            let _ = ctx.arc(x, y, 1.1, 0.0, std::f64::consts::TAU);
+            let _ = ctx.fill();
+            last = Some((x, y));
+        }
+        dash(ctx, false, 0.0, 0.0);
+    };
+    draw_side(&|s: &(f64, (f64, f64), (f64, f64))| s.1, "rgba(126,232,171,0.40)");
+    draw_side(&|s: &(f64, (f64, f64), (f64, f64))| s.2, "rgba(126,204,238,0.42)");
+}
+
 
 pub fn wheel(bv: &mut BookView, dy: f64) {
     let f = if dy > 0.0 { 1.12 } else { 1.0 / 1.12 };

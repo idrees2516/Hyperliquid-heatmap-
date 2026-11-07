@@ -59,10 +59,31 @@ header{
 .pane{position:relative;flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
 #chart{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:crosshair}
 #book-pane{display:none}
-#book-toolbar{
-  flex:none;display:flex;align-items:center;gap:14px;padding:5px 10px;flex-wrap:wrap;
-  background:var(--panel2);border-bottom:1px solid var(--line);
+#book-canvas-wrap{position:relative;flex:1;min-height:0}
+#book-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:crosshair}
+/* TapeSurf-style floating control card over the chart */
+#book-overlay{
+  position:absolute;top:10px;left:10px;z-index:4;width:238px;
+  background:rgba(7,13,20,.84);border:1px solid #16232f;border-radius:10px;
+  padding:9px 11px;display:flex;flex-direction:column;gap:7px;
+  backdrop-filter:blur(6px);box-shadow:0 10px 30px rgba(0,0,0,.45);
 }
+.ov-head{display:flex;align-items:center;gap:7px;font-size:11px}
+.ov-dot{width:7px;height:7px;border-radius:50%;background:var(--buy);box-shadow:0 0 7px rgba(31,199,126,.8);animation:ovpulse 2s infinite}
+@keyframes ovpulse{0%,100%{opacity:1}50%{opacity:.35}}
+.ov-title{font-weight:700;color:var(--bright);letter-spacing:.6px;font-size:11px}
+.ov-head b{color:#fff;font-size:12.5px}
+.ov-spr{color:var(--dim);font-size:9.5px;margin-left:auto}
+.ov-row{display:flex;align-items:center;gap:6px;min-height:20px;flex-wrap:wrap}
+.ov-row .bt-lbl{width:54px;flex:none;margin:0}
+.ov-val{font-size:10px;color:var(--txt)}
+.ov-val b{font-weight:700}
+.ov-imb-wrap{flex:1;min-width:70px}
+.ov-imb-track{height:5px;border-radius:3px;overflow:hidden;background:#141f2b;display:flex}
+.ov-imb-track .b{background:var(--buy)}
+.ov-imb-track .s{background:var(--sell)}
+.ov-imb-lbl{font-size:8.5px;color:var(--dim);margin-top:2px}
+.ov-extra{border-top:1px solid #14202c;padding-top:7px;gap:4px}
 .bt-title{font-size:10px;font-weight:700;letter-spacing:1.4px;color:var(--accent)}
 .bt-group{display:flex;align-items:center;gap:4px}
 .bt-lbl{font-size:9px;color:var(--dim);letter-spacing:1px;margin-right:2px}
@@ -72,10 +93,8 @@ header{
 }
 .bt-btn:hover:not(.active){color:var(--txt)}
 .bt-btn.active{background:#132433;color:var(--accent);border-color:#1d3a54}
-#bt-intensity{width:110px;accent-color:#2dd4bf}
-.bt-hint{font-size:9px;color:var(--dim);margin-left:auto}
-#book-canvas-wrap{position:relative;flex:1;min-height:0}
-#book-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:crosshair}
+#bt-intensity{width:120px;accent-color:#2dd4bf}
+.bt-hint{font-size:9px;color:var(--dim)}
 #tooltip{
   position:absolute;pointer-events:none;display:none;z-index:5;
   background:rgba(8,13,21,.94);border:1px solid var(--line2);border-radius:8px;
@@ -327,34 +346,62 @@ table.mtab .up{color:var(--buy)} table.mtab .down{color:var(--sell)} table.mtab 
     <div id="tooltip"></div>
   </div>
   <div id="book-pane" class="pane">
-    <div id="book-toolbar">
-      <span class="bt-title">LIQUIDITY&nbsp;MAP</span>
-      <div class="bt-group" id="bt-range">
-        <span class="bt-lbl">RANGE</span>
-        <button class="bt-btn" data-cols="400">~3m</button>
-        <button class="bt-btn" data-cols="900">~6m</button>
-        <button class="bt-btn" data-cols="1800">~12m</button>
-        <button class="bt-btn active" data-cols="3600">~24m</button>
-        <button class="bt-btn" data-cols="6800">~45m</button>
-      </div>
-      <div class="bt-group">
-        <span class="bt-lbl">HEAT</span>
-        <input type="range" id="bt-intensity" min="-100" max="100" value="0" title="colour window: left = only the biggest walls, right = thinner liquidity">
-      </div>
-      <div class="bt-group" id="bt-toggles">
-        <button class="bt-btn tgl active" data-t="trades">TRADES</button>
-        <button class="bt-btn tgl active" data-t="liqs">LIQ</button>
-        <button class="bt-btn tgl active" data-t="profile">PROFILE</button>
-        <button class="bt-btn tgl active" data-t="vwap">VWAP</button>
-        <button class="bt-btn tgl active" data-t="dom">DOM</button>
-        <button class="bt-btn tgl active" data-t="radar">RADAR</button>
-        <button class="bt-btn tgl active" data-t="delta">Δ/CVD</button>
-      </div>
-      <button class="bt-btn" id="bt-recenter" title="back to the live edge: refit zoom, price range and heat">RECENTER</button>
-      <span class="bt-hint">scroll = zoom · hover = readout · dbl-click = reset heat · Recenter = live edge</span>
-    </div>
     <div id="book-canvas-wrap">
       <canvas id="book-canvas"></canvas>
+      <div id="book-overlay">
+        <div class="ov-head">
+          <span class="ov-dot"></span>
+          <span class="ov-title" id="ov-coin">BTC</span>
+          <b id="ov-px">—</b>
+          <span class="ov-spr" id="ov-spr">—</span>
+        </div>
+        <div class="ov-row">
+          <span class="bt-lbl">Heatmap</span>
+          <input type="range" id="bt-intensity" min="-100" max="100" value="0" title="colour window: left = only the biggest walls, right = thinner liquidity">
+        </div>
+        <div class="ov-row">
+          <span class="bt-lbl">Time</span>
+          <div class="bt-group" id="bt-range">
+            <button class="bt-btn" data-cols="150">1m</button>
+            <button class="bt-btn" data-cols="1500">10m</button>
+            <button class="bt-btn active" data-cols="4500">30m</button>
+            <button class="bt-btn" data-cols="6800">45m</button>
+          </div>
+        </div>
+        <div class="ov-row">
+          <span class="bt-lbl">Trades</span>
+          <div class="bt-group" id="bt-toggles">
+            <button class="bt-btn tgl active" data-t="trades">Bid ● Ask</button>
+            <button class="bt-btn tgl active" data-t="candles">Candles Auto</button>
+            <button class="bt-btn tgl active" data-t="liqs">LIQ</button>
+          </div>
+        </div>
+        <div class="ov-row">
+          <span class="bt-lbl">Volume</span>
+          <span class="ov-val">Total: <b id="ov-vol">—</b></span>
+          <button class="bt-btn tgl active" data-t="volume">BARS</button>
+        </div>
+        <div class="ov-row">
+          <span class="bt-lbl">Profits</span>
+          <span class="ov-val" id="ov-profit">—</span>
+        </div>
+        <div class="ov-row">
+          <span class="bt-lbl">Book ±1%</span>
+          <span class="ov-imb-wrap">
+            <span class="ov-imb-track"><span class="b" id="ov-imb-bar" style="width:50%"></span><span class="s" style="flex:1"></span></span>
+            <span class="ov-imb-lbl" id="ov-imb-txt">50 / 50</span>
+          </span>
+        </div>
+        <div class="ov-row ov-extra">
+          <button class="bt-btn tgl active" data-t="trails">TRAILS</button>
+          <button class="bt-btn tgl active" data-t="profile">PROFILE</button>
+          <button class="bt-btn tgl active" data-t="vwap">VWAP</button>
+          <button class="bt-btn tgl active" data-t="dom">DOM</button>
+          <button class="bt-btn tgl active" data-t="radar">RADAR</button>
+          <button class="bt-btn tgl" data-t="delta">Δ/CVD</button>
+          <button class="bt-btn" id="bt-recenter" title="back to the live edge: refit zoom, price range and heat">RECENTER</button>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -372,20 +419,26 @@ table.mtab .up{color:var(--buy)} table.mtab .down{color:var(--sell)} table.mtab 
     <section class="panel">
       <div class="panel-h">Heatmap legend · resting liquidity</div>
       <div style="padding:10px 12px">
-        <div style="height:12px;border-radius:3px;background:linear-gradient(90deg,#050f1f 0%,#0a3660 26%,#1373b0 45%,#7fd0f0 62%,#f8f2c3 74%,#ffe14a 81%,#ff8a00 90%,#e8281c 100%)"></div>
-        <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--dim);margin-top:4px">
-          <span>thin</span><span>→</span><span>walls</span>
+        <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--dim);margin-bottom:3px">
+          <span style="color:#54b6da">ASKS (above price)</span><span>thin → walls</span>
         </div>
+        <div style="height:10px;border-radius:3px;background:linear-gradient(90deg,#070d18 0%,#0c3358 30%,#2b93c2 60%,#84d6ea 82%,#f6feff 100%)"></div>
+        <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--dim);margin:6px 0 3px">
+          <span style="color:#53c289">BIDS (below price)</span><span>thin → walls</span>
+        </div>
+        <div style="height:10px;border-radius:3px;background:linear-gradient(90deg,#06110d 0%,#0c5035 30%,#2aa36c 60%,#83dcab 82%,#f6fff9 100%)"></div>
         <div style="font-size:10px;color:var(--dim);line-height:1.7;margin-top:8px">
-          Every column is a full L2 snapshot (400 ms). Colour = resting size on a log scale:
-          <b style="color:#1373b0">blue</b> thin · <b style="color:#7fd0f0">cyan</b> heavy ·
-          <b style="color:#f8f2c3">white</b>/<b style="color:#ffe14a">yellow</b> dense ·
-          <b style="color:#e8281c">red</b> walls.
-          <b style="color:#ff4fd0">Pink line</b> = traded price path,
-          dashed <b style="color:#ff8fe0">VWAP ±1σ</b> bands,
-          <b style="color:#1fe3a6">teal</b>/<b style="color:#ff4d6a">red HL circles</b> = whale buys / sells
-          (sized by $), <b style="color:#ffd24a">gold HL diamonds</b> = liquidations,
-          countdown under the last-price tag = candle close.
+          Every column is a full L2 snapshot (400 ms). Asks paint
+          <b style="color:#2b93c2">blue → cyan</b>, bids paint
+          <b style="color:#2aa36c">green → mint</b> — brighter = larger resting size.
+          <b style="color:#ffe14d">Yellow stepped line</b> = traded price path,
+          <b style="color:#17d3a1">teal</b>/<b style="color:#ff4d5e">red candles</b> = 1m OHLC,
+          thin white dashes = <b>VWAP ±1σ</b>,
+          dotted tracks follow the biggest walls, cyan flash columns mark
+          execution bursts, bottom bars = volume (teal buy / red sell),
+          right-edge pills tag the live price and VWAP.
+          <b style="color:#1fe3a6">Teal</b>/<b style="color:#ff4d6a">red HL circles</b> = whale buys / sells,
+          <b style="color:#ffd24a">gold diamonds</b> = liquidations.
           Right columns: <b style="color:#34f0a0">LIQ LEVELS</b> (green long / red short
           liquidation levels with LEVEL MAX / CUM MAX), volume profile, live DOM ladder.
         </div>

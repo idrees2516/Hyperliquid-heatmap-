@@ -1282,6 +1282,7 @@ pub fn start() {
             el::<web_sys::Element>("radar-levels").set_inner_html("");
             el::<web_sys::Element>("cascade-feed").set_inner_html("");
             el::<web_sys::Element>("book-liq-feed").set_inner_html("");
+            set_text("ov-coin", &coin);
             BOOK.with(|b| b.borrow_mut().reset(&coin));
             send_sub_current();
             fetch_snapshot();
@@ -1449,6 +1450,9 @@ pub fn start() {
                         match key.as_str() {
                             "trades" => bv.show_trades = !on,
                             "liqs" => bv.show_liqs = !on,
+                            "candles" => bv.show_candles = !on,
+                            "volume" => bv.show_volume = !on,
+                            "trails" => bv.show_trails = !on,
                             "profile" => {
                                 bv.show_profile = !on;
                                 bv.invalidate();
@@ -1490,7 +1494,7 @@ pub fn start() {
                         if let Some(c) = x.get_attribute("data-cols") {
                             let _ = x.set_attribute(
                                 "class",
-                                if c == "3600" { "bt-btn active" } else { "bt-btn" },
+                                if c == "4500" { "bt-btn active" } else { "bt-btn" },
                             );
                         }
                     }
@@ -1500,8 +1504,52 @@ pub fn start() {
                 .unwrap();
             onc.forget();
         }
-    }
 
+        // overlay panel stats: price / spread / volume / profits / imbalance
+        every(700, || {
+            let view = STATE.with(|s| s.borrow().side_view.clone());
+            if view != "book" {
+                return;
+            }
+            let (px, spr, vol, profit, imb) = BOOK.with(|b| {
+                let bv = b.borrow();
+                (
+                    bv.px_now,
+                    bv.spr_bps,
+                    bv.vol_total,
+                    bv.profit,
+                    bv.imb,
+                )
+            });
+            if px > 0.0 {
+                set_text("ov-px", &fmt_px(px));
+                set_text("ov-spr", &format!("{:.1}bp", spr));
+            }
+            set_text("ov-vol", &ui::fmt_k(vol));
+            let (sign, amount) = if profit >= 0.0 {
+                ("+", profit)
+            } else {
+                ("-", -profit)
+            };
+            let profit_el = el::<web_sys::Element>("ov-profit");
+            profit_el.set_text_content(Some(&format!("{}${}", sign, ui::fmt_k(amount))));
+            let _ = profit_el.set_attribute(
+                "style",
+                if profit >= 0.0 {
+                    "color:#2fe08a;font-weight:700;font-size:11px"
+                } else {
+                    "color:#ff5c5c;font-weight:700;font-size:11px"
+                },
+            );
+            // book imbalance mini-bar
+            let bar = el::<web_sys::Element>("ov-imb-bar");
+            let _ = bar.set_attribute("style", &format!("width:{:.0}%", (imb * 100.0).round()));
+            set_text(
+                "ov-imb-txt",
+                &format!("{:.0} / {:.0}", imb * 100.0, (1.0 - imb) * 100.0),
+            );
+        });
+    }
     // modal close (delegation) + ESC
     {
         let onc = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {

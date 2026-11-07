@@ -26,6 +26,13 @@ impl HlRest {
 
     async fn post(&self, body: &serde_json::Value) -> Result<reqwest::Response> {
         let _g = self.lock.lock().await; // serialize requests; be polite to the API
+        self.post_inner(body).await
+    }
+
+    /// Lock-free variant for callers that pace themselves (the bookmap
+    /// poller): lets the l2Book densifier run at its own cadence instead of
+    /// queueing behind wallet enrichment traffic on the shared lock.
+    async fn post_inner(&self, body: &serde_json::Value) -> Result<reqwest::Response> {
         let resp = self
             .client
             .post(&self.url)
@@ -40,7 +47,21 @@ impl HlRest {
         &self,
         body: &serde_json::Value,
     ) -> Result<T> {
-        let resp = self.post(body).await?;
+        self.decode(self.post(body).await?).await
+    }
+
+    /// self-paced variant (see `post_inner`)
+    pub async fn post_json_nolock<T: for<'de> serde::Deserialize<'de>>(
+        &self,
+        body: &serde_json::Value,
+    ) -> Result<T> {
+        self.decode(self.post_inner(body).await?).await
+    }
+
+    async fn decode<T: for<'de> serde::Deserialize<'de>>(
+        &self,
+        resp: reqwest::Response,
+    ) -> Result<T> {
         let status = resp.status();
         let text = resp.text().await.context("read body")?;
         if !status.is_success() {
