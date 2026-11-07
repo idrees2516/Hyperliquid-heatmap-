@@ -134,11 +134,23 @@ aside{
 .panel{border-bottom:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
 .panel:last-child{border-bottom:none}
 .panel-h{
-  display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--panel2);
+  display:flex;align-items:center;gap:8px;padding:8px 12px 8px 27px;background:var(--panel2);
   border-bottom:1px solid var(--line);font-size:10px;font-weight:700;letter-spacing:1.2px;color:var(--dim);
-  text-transform:uppercase;flex:none;
+  text-transform:uppercase;flex:none;cursor:pointer;user-select:none;position:relative;
 }
+.panel-h:hover{background:#101a28;color:var(--txt)}
+.panel-h::before{content:"⠿";position:absolute;left:11px;top:50%;transform:translateY(-52%);color:#3b526e;font-size:11px;font-weight:400}
+.panel-h .chev{margin-left:auto;color:#6d87a6;font-size:9px;transition:transform .18s ease;flex:none}
 .panel-h .livechip{margin-left:auto;color:var(--accent);letter-spacing:0;font-weight:600}
+.panel.collapsed>*:not(.panel-h){display:none!important}
+.panel.collapsed .chev{transform:rotate(-90deg)}
+#aside-toggle{
+  background:var(--panel2);color:var(--txt);border:1px solid var(--line2);border-radius:6px;
+  padding:3px 9px;cursor:pointer;font-size:12px;line-height:1;margin-left:2px;
+}
+#aside-toggle:hover{color:var(--accent);border-color:#1d3a54}
+body.aside-off{grid-template-columns:1fr 0}
+body.aside-off aside{display:none}
 
 /* flow */
 #flow{padding:10px 12px}
@@ -159,9 +171,13 @@ aside{
 .liq-row{display:flex;align-items:center;gap:7px;padding:3.5px 12px;font-size:10.5px;border-bottom:1px solid rgba(21,32,46,.5)}
 .liq-row .t{color:var(--dim);min-width:52px}
 .liq-row .c{color:var(--bright);font-weight:700;min-width:52px}
-.liq-row .dir{font-weight:700}
-.liq-row .dir.long{color:var(--sell)} .liq-row .dir.short{color:var(--buy)}
-.liq-row .amt{color:var(--gold);font-weight:700}
+.liq-row .dir{font-weight:700;font-size:9px;padding:1.5px 6px;border-radius:3px;white-space:nowrap}
+.liq-row .dir.long{color:#ffb4bd;background:rgba(229,72,77,.14);border:1px solid rgba(229,72,77,.4)}
+.liq-row .dir.short{color:#8ff0c6;background:rgba(31,199,126,.13);border:1px solid rgba(31,199,126,.4)}
+.liq-row .pxp{font-size:9.5px;font-weight:700;padding:1.5px 6px;border-radius:3px;color:#eaf3f9;white-space:nowrap}
+.liq-row .pxp.long{background:#b3323e}
+.liq-row .pxp.short{background:#1b8a63}
+.liq-row .amt{color:var(--gold);font-weight:700;background:rgba(245,196,81,.1);border:1px solid rgba(245,196,81,.32);padding:1.5px 6px;border-radius:3px;white-space:nowrap}
 .liq-row a{color:var(--dim)} .liq-row a:hover{color:var(--accent)}
 .liq-row.fresh{animation:flash .9s ease-out}
 @keyframes flash{0%{background:rgba(245,196,81,.22)}100%{background:transparent}}
@@ -316,7 +332,7 @@ table.mtab .up{color:var(--buy)} table.mtab .down{color:var(--sell)} table.mtab 
 .warm .pulse{width:10px;height:10px;border-radius:50%;background:var(--accent);animation:wp 1.2s infinite}
 @keyframes wp{0%,100%{opacity:.25}50%{opacity:1}}
 </style>
-<link rel="modulepreload" href="/frontend.js?v=1794022120"><link rel="preload" href="/frontend_bg.wasm?v=1794022120" crossorigin="anonymous" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/frontend.js?v=1794051419"><link rel="preload" href="/frontend_bg.wasm?v=1794051419" crossorigin="anonymous" as="fetch" type="application/wasm"></head>
 <body>
 <header>
   <div class="brand">
@@ -338,6 +354,7 @@ table.mtab .up{color:var(--buy)} table.mtab .down{color:var(--sell)} table.mtab 
   <div class="status"><span class="dot" id="dot-upstream"></span>HYPERLIQUID&nbsp;L1</div>
   <div class="status"><span class="dot" id="dot-ws"></span>WS</div>
   <span id="clock">--:--:--</span>
+  <button id="aside-toggle" title="collapse / expand the right-side panels">◧</button>
 </header>
 
 <div id="chart-wrap">
@@ -417,7 +434,7 @@ table.mtab .up{color:var(--buy)} table.mtab .down{color:var(--sell)} table.mtab 
 
   <div class="side-view active" id="view-book" style="grid-template-rows:auto auto 1fr">
     <section class="panel">
-      <div class="panel-h">Heatmap legend · resting liquidity</div>
+      <div class="panel-h">Heatmap legend · resting liquidity<span class="chev">▾</span></div>
       <div style="padding:10px 12px">
         <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--dim);margin-bottom:3px">
           <span style="color:#54b6da">ASKS (above price)</span><span>thin → walls</span>
@@ -445,7 +462,7 @@ table.mtab .up{color:var(--buy)} table.mtab .down{color:var(--sell)} table.mtab 
       </div>
     </section>
     <section class="panel">
-      <div class="panel-h">Book pressure · ±1%</div>
+      <div class="panel-h">Book pressure · ±1%<span class="chev">▾</span></div>
       <div style="padding:10px 12px">
         <div style="display:flex;justify-content:space-between;font-size:10.5px;margin-bottom:4px">
           <span style="color:var(--buy)">BIDS <b id="bp-bid">—</b></span>
@@ -458,14 +475,14 @@ table.mtab .up{color:var(--buy)} table.mtab .down{color:var(--sell)} table.mtab 
       </div>
     </section>
     <section class="panel">
-      <div class="panel-h">Liquidations · live <span class="livechip">streaming</span></div>
+      <div class="panel-h">Liquidations · live <span class="livechip">streaming</span><span class="chev">▾</span></div>
       <div id="book-liq-feed" class="feed" style="overflow-y:auto"></div>
     </section>
   </div>
 
   <div class="side-view" id="view-live">
     <section class="panel" id="flow-panel">
-      <div class="panel-h">On-chain flow · session</div>
+      <div class="panel-h">On-chain flow · session<span class="chev">▾</span></div>
       <div id="flow">
         <div class="delta-line"><b id="flow-delta">—</b><span id="flow-note">net taker delta</span></div>
         <div class="split-bar"><div class="b" id="flow-bar-b" style="width:50%"></div><div class="s" id="flow-bar-s" style="width:50%"></div></div>
@@ -481,17 +498,17 @@ table.mtab .up{color:var(--buy)} table.mtab .down{color:var(--sell)} table.mtab 
     </section>
 
     <section class="panel" style="min-height:0">
-      <div class="panel-h">Liquidations<span class="livechip" id="liq-count"></span></div>
+      <div class="panel-h">Liquidations<span class="livechip" id="liq-count"></span><span class="chev">▾</span></div>
       <div id="liq-feed"></div>
     </section>
 
     <section class="panel" style="min-height:0">
-      <div class="panel-h">On-chain tape<span class="livechip" id="tape-note">who is trading</span></div>
+      <div class="panel-h">On-chain tape<span class="livechip" id="tape-note">who is trading</span><span class="chev">▾</span></div>
       <div id="tape-scroll"></div>
     </section>
 
     <section class="panel" style="min-height:0">
-      <div class="panel-h">Traders · 60m<span class="livechip" id="traders-note">winners &amp; losers</span></div>
+      <div class="panel-h">Traders · 60m<span class="livechip" id="traders-note">winners &amp; losers</span><span class="chev">▾</span></div>
       <div id="traders-scroll"></div>
     </section>
   </div>
@@ -502,25 +519,25 @@ table.mtab .up{color:var(--buy)} table.mtab .down{color:var(--sell)} table.mtab 
       <div class="sub" id="radar-oh">arming…</div>
     </div>
     <section class="panel" style="min-height:0">
-      <div class="panel-h">Magnet levels<span class="livechip">estimated forced-flow pockets</span></div>
+      <div class="panel-h">Magnet levels<span class="livechip">estimated forced-flow pockets</span><span class="chev">▾</span></div>
       <div id="radar-levels"></div>
     </section>
     <section class="panel" style="min-height:0">
-      <div class="panel-h">Cascades · last_cascade<span class="livechip" id="cascade-count"></span></div>
+      <div class="panel-h">Cascades · last_cascade<span class="livechip" id="cascade-count"></span><span class="chev">▾</span></div>
       <div id="cascade-feed"></div>
     </section>
   </div>
 
   <div class="side-view" id="view-opps">
     <section class="panel" style="min-height:0">
-      <div class="panel-h">Opportunities<span class="livechip" id="opps-note">live setups from detected events</span></div>
+      <div class="panel-h">Opportunities<span class="livechip" id="opps-note">live setups from detected events</span><span class="chev">▾</span></div>
       <div id="opps-scroll"><div class="warm" style="position:static;padding:30px 0">scanning markets…</div></div>
     </section>
   </div>
 
   <div class="side-view" id="view-tune">
     <section class="panel" style="min-height:0">
-      <div class="panel-h">Tuning<span class="livechip" id="tune-note">live engine params</span></div>
+      <div class="panel-h">Tuning<span class="livechip" id="tune-note">live engine params</span><span class="chev">▾</span></div>
       <div id="tune-scroll"></div>
     </section>
   </div>
@@ -543,7 +560,7 @@ table.mtab .up{color:var(--buy)} table.mtab .down{color:var(--sell)} table.mtab 
 
 
 <script type="module">
-import init from '/frontend.js?v=1794022120';
-init({ module_or_path: '/frontend_bg.wasm?v=1794022120' });
+import init from '/frontend.js?v=1794051419';
+init({ module_or_path: '/frontend_bg.wasm?v=1794051419' });
 </script></body>
 </html>

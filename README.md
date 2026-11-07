@@ -8,7 +8,7 @@
 
 Onchain Footprint is a realtime order-flow terminal that lets you **look inside every candle across all Hyperliquid perpetuals**. Every trade on Hyperliquid is fully on-chain and attributed to wallets, so the footprint shows *who* is buying and selling, *why* (intent), and *whether those traders are winners or losers*.
 
-- **Bookmap terminal** — a full TapeSurf-style liquidity-map terminal (`BOOK` tab): live L2 **heatmap** with split ramps (**asks blue→cyan, bids green→mint**, log size scale, one column per book snapshot), a **yellow stepped price path**, **1m candles** (teal up / red down, auto timeframe), thin-white dashed **VWAP ±1σ**, **dotted wall tracks**, **cyan execution-flash columns**, a bottom **volume histogram**, **trade bubbles** (teal buys / red sells, whale prints venue-tagged `HL`), **gold liquidation diamonds**, a **LIQ LEVELS rail**, the live **DOM ladder** with depth bars, a cumulative **depth chart**, a **volume profile** with POC/VAH/VAL, a **Δ/CVD strip**, and the radar's magnet levels drawn straight onto the map — all framed by a floating TapeSurf-style control card (Heatmap slider, Time tabs, Trades/Candles toggles, Volume total, Profits, book-imbalance bar).
+- **Bookmap terminal** — a full TapeSurf-style liquidity-map terminal (`BOOK` tab): live L2 **heatmap** with split ramps (**asks blue→cyan, bids green→mint**, log size scale, one column per book snapshot), a **yellow stepped price path**, **1m candles** (teal up / red down, auto timeframe), thin-white dashed **VWAP ±1σ**, **dotted wall tracks**, **cyan execution-flash columns**, a bottom **volume histogram**, **trade bubbles** (teal buys / red sells, whale prints venue-tagged `HL`), **gold liquidation diamonds**, a **LIQ LEVELS rail**, the live **ORDER BOOK ladder** (bids/asks % split header, depth bars, order-count chips, cumulative-depth staircase, current-price pill with a time-at-price timer), a cumulative **depth chart**, a **volume profile** with POC/VAH/VAL, a **Δ/CVD strip**, and the radar's magnet levels drawn straight onto the map — all framed by a floating TapeSurf-style control card (Heatmap slider, Time tabs, Trades/Candles toggles, Volume total, Profits, book-imbalance bar). **Every right-side panel is collapsible** (TapeSurf-style header bars with drag grips and chevrons — click to fold a panel into a thin vertical rail; RECENTER re-expands them all), and the whole right sidebar folds away with the **◧** header button for a full-width terminal.
 - **Footprint chart** — per price level inside every candle: taker **SELL × BUY** notional (USD), heat-mapped, with the point-of-control outlined and a per-window delta strip.
 - **Who is trading** — every print carries the **taker and maker wallet** (link straight to Hypurrscan). A 60-minute trader leaderboard ranks wallets by flow with per-wallet buy/sell split and market share.
 - **Intent behind each trade** — fills are classified live as `AGGR` (aggressive open/increase), `LIQ` (liquidation), `DELEV` (deleveraging), `STOP` (realized-loss reduce), `TP` (realized-profit reduce), `HEDGE` (cross-market delta-neutral leg) or `REDUCE`.
@@ -26,7 +26,7 @@ Five sidebar views:
 
 | tab    | what it shows |
 |--------|---------------|
-| `BOOK` | bookmap terminal — live L2 heatmap of resting liquidity, trade bubbles, liquidation diamonds, DOM ladder, depth chart, volume profile (POC/VAH/VAL), Δ/CVD strip, radar magnet lines |
+| `BOOK` | bookmap terminal — live L2 heatmap of resting liquidity, trade bubbles, liquidation diamonds, collapsible ORDER BOOK ladder (order-count chips, cum-depth staircase), LIQ LEVELS with price pills, depth chart, volume profile (TRADED/ROW MAX/Δ, POC/VAH/VAL), Δ/CVD strip, radar magnet lines, TapeSurf-style liquidation feed (side pills + price tags) |
 | `LIVE` | footprint chart, session flow stats, liquidation feed, on-chain tape, trader leaderboard |
 | `RADAR`| magnet levels (state `ARMED / ENGAGED / SWEPT`, estimated forced flow, distance from price), cascade history (`last_cascade`), overhang pills |
 | `OPPS` | live opportunities with kind, strength (0–100), direction bias, target price and TTL |
@@ -75,23 +75,41 @@ yellow stepped path, candles, bottom tape):
   marks the streaming print feed at the bottom-right of the heat.
 - **LIQ LEVELS rail** — a right-hand panel in the reference style: estimated
   forced-flow per price row as **green long / red short bars** with
-  `LEVEL MAX` / `CUM MAX` stats per side, a `price` tick and a `±8%` domain
-  note. The panel maps its own wider price domain so the full liquidation
-  landscape stays visible even when the chart is zoomed tight on the heat.
-- **DOM ladder** — the live book: worst→best asks (red bars) above the
-  spread row, best→worst bids (teal bars) below, sizes in USD, wall rows
-  outlined.
+  `LEVEL MAX` / `CUM MAX` stats per side, reference-style **price pills** on
+  the biggest armed levels (solid side-coloured price tag + dark `×hits`
+  tag), a `price` tick and a `±8%` domain note. The panel maps its own wider
+  price domain so the full liquidation landscape stays visible even when
+  the chart is zoomed tight on the heat.
+- **ORDER BOOK (limit orders)** — the live resting-order ladder at
+  TapeSurf-level detail: a collapsible header with drag grip, **MODE** chip
+  (`DETAILED` / `COMPACT`) and `GROUP auto` hint; a **`bids X% / Y% asks`
+  split bar**; `PRICE` / `LEVEL USD` / **`MAX`** column headers; ▲/▼ direction
+  glyphs; depth bars with the USD size inside; **order-count chips** (`×N` —
+  Hyperliquid reports the aggregated limit-order count per level, the
+  on-chain equivalent of the reference's venue chips); a **blue cumulative-
+  depth staircase** growing away from the spread; a highlighted **current-
+  price pill** with the spread in bp and a **`m:ss` time-at-price timer**;
+  `$` scale labels at the bottom (DETAILED only). COMPACT mode tightens the
+  rows and drops the chips / staircase / scale for a narrow rail.
 - **Depth chart** — cumulative bid/ask curves ±1.2% around mid.
-- **Volume profile** — buy/sell histogram of the visible window with
-  **POC** and the 70% value area (**VAH/VAL**) on dark backing chips.
+- **Volume profile** — buy/sell histogram of the visible window with a
+  `TRADED` / `ROW MAX` / **`Δ ±x · x%`** stat header, **POC** and the 70%
+  value area (**VAH/VAL**) on dark backing chips.
 - **Δ/CVD strip** — per-minute taker delta bars with the cumulative-delta line
   (off by default, like the reference).
 - **Radar overlay** — armed/engaged magnet levels as dashed lines with
   estimated forced-flow labels.
+- **Collapsible panels** — every right-side canvas panel (LIQ LEVELS,
+  PROFILE, ORDER BOOK) carries a TapeSurf-style header band (drag-grip dots,
+  bold title, chevron); a click folds it into a **15px vertical rail** with a
+  rotated title, and the heatmap instantly re-fills the freed width. The
+  cursor turns into a pointer over headers. The right **sidebar panels**
+  (every tab) fold the same way via their headers, and the **◧** header
+  button hides the whole sidebar for a full-width terminal.
 - **Interaction** — scroll to zoom time, hover for a price/time/level-size
   readout, card toggles for every panel, range presets 1m…45m, and
   **RECENTER** to jump back to the live edge (default zoom, auto price fit,
-  neutral heat).
+  neutral heat, all panels re-expanded).
 
 Book data pipeline: the coin you watch is subscribed to Hyperliquid's
 `l2Book` WS channel *and* polled over REST (~2 Hz) to densify the map (the

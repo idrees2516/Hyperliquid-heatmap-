@@ -1344,11 +1344,33 @@ pub fn start() {
             let c2 = bcanvas.clone();
             let mv = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |e| {
                 if let Some((x, y)) = book_canvas_pos(&e) {
-                    BOOK.with(|b| b.borrow_mut().hover = Some((x, y)));
+                    let hit = BOOK.with(|b| {
+                        let mut bv = b.borrow_mut();
+                        bv.hover = Some((x, y));
+                        bv.header_hit(x, y)
+                    });
+                    // pointer over collapsible panel headers, crosshair elsewhere
+                    if let Some(cnv) = BOOK_CANVAS.with(|c| c.borrow().clone()) {
+                        let _ = cnv
+                            .style()
+                            .set_property("cursor", if hit { "pointer" } else { "crosshair" });
+                    }
                 }
             });
             c2.set_onmousemove(Some(mv.as_ref().unchecked_ref()));
             mv.forget();
+        }
+        {
+            let c2 = bcanvas.clone();
+            // collapse / expand the right-side panels (or flip the ORDER BOOK
+            // MODE chip) when a panel header is clicked
+            let ck = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |e| {
+                if let Some((x, y)) = book_canvas_pos(&e) {
+                    BOOK.with(|b| b.borrow_mut().click(x, y));
+                }
+            });
+            c2.set_onclick(Some(ck.as_ref().unchecked_ref()));
+            ck.forget();
         }
         {
             let c2 = bcanvas.clone();
@@ -1480,11 +1502,16 @@ pub fn start() {
             }
         }
 
-        // Recenter: back to the live edge (default zoom, auto price, neutral heat)
+        // Recenter: back to the live edge (default zoom, auto price, neutral
+        // heat) and re-expand any folded right panels
         {
             let btn = el::<web_sys::HtmlElement>("bt-recenter");
             let onc = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
-                BOOK.with(|b| b.borrow_mut().recenter());
+                BOOK.with(|b| {
+                    let mut bv = b.borrow_mut();
+                    bv.recenter();
+                    bv.expand_all();
+                });
                 let slider = el::<web_sys::HtmlInputElement>("bt-intensity");
                 slider.set_value("0");
                 // restore the ~24m range preset as active
@@ -1591,6 +1618,58 @@ pub fn start() {
                 onc.forget();
             }
         }
+    }
+
+    // collapsible right-side panels (TapeSurf-style): clicking a panel header
+    // folds its body away; the chevron rotates via CSS
+    {
+        let onc = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
+            if let Some(t) = e.target() {
+                if let Ok(x) = t.dyn_into::<web_sys::Element>() {
+                    // walk up to the enclosing .panel-h (click may land on a
+                    // child chip inside the header)
+                    let mut cur = Some(x);
+                    while let Some(c) = cur {
+                        let is_h = c
+                            .get_attribute("class")
+                            .map(|s| s.split_whitespace().any(|w| w == "panel-h"))
+                            .unwrap_or(false);
+                        if is_h {
+                            if let Some(p) = c.parent_element() {
+                                let _ = p.class_list().toggle("collapsed");
+                            }
+                            break;
+                        }
+                        cur = c.parent_element();
+                    }
+                }
+            }
+        });
+        doc().add_event_listener_with_callback("click", onc.as_ref().unchecked_ref())
+            .unwrap();
+        onc.forget();
+    }
+
+    // collapse / expand the whole right aside (terminal goes full width)
+    {
+        let btn = el::<web_sys::HtmlElement>("aside-toggle");
+        let onc = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            if let Some(body) = doc().body() {
+                let off = body.class_list().toggle("aside-off").unwrap_or(false);
+                let btn = el::<web_sys::HtmlElement>("aside-toggle");
+                let _ = btn.set_attribute(
+                    "title",
+                    if off {
+                        "show the right-side panels"
+                    } else {
+                        "collapse the right-side panels (full-width terminal)"
+                    },
+                );
+            }
+        });
+        btn.add_event_listener_with_callback("click", onc.as_ref().unchecked_ref())
+            .unwrap();
+        onc.forget();
     }
 
     // periodic ticks

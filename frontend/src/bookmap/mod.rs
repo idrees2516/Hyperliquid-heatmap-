@@ -185,6 +185,17 @@ const FONT: &str = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
 const FONT_B: &str = "bold 10px ui-monospace, SFMono-Regular, Menlo, monospace";
 /// 9px bold for the right-edge price pills (keeps them inside the axis)
 const FONT_P: &str = "bold 9px ui-monospace, SFMono-Regular, Menlo, monospace";
+/// 9px for panel header bands
+const FONT_H: &str = "bold 9px ui-monospace, SFMono-Regular, Menlo, monospace";
+/// 8px for stat lines / chips inside panels
+const FONT_S: &str = "8px ui-monospace, SFMono-Regular, Menlo, monospace";
+/// height of the collapsible panel header bands
+const HDR_H: f64 = 17.0;
+/// width of a collapsed panel rail (vertical title strip)
+const RAIL_W: f64 = 15.0;
+/// header band chrome
+const HDR_BG: &str = "#0d1622";
+const HDR_LN: &str = "#1c2c40";
 
 /// full rebuild cadence: keeps the shifted image crisp
 const REBUILD_EVERY_MS: f64 = 8_000.0;
@@ -219,6 +230,24 @@ pub struct BookView {
     pub show_volume: bool,
     /// dotted wall tracks (biggest resting walls per column)
     pub show_trails: bool,
+    // ---- TapeSurf-style collapsible right panels --------------------------
+    /// LIQ LEVELS panel collapsed to a thin rail
+    pub col_liq: bool,
+    /// volume-profile panel collapsed to a thin rail
+    pub col_prof: bool,
+    /// ORDER BOOK (DOM) panel collapsed to a thin rail
+    pub col_dom: bool,
+    /// ORDER BOOK mode: true = Compact (tight rows, no chips/staircase)
+    pub dom_compact: bool,
+    /// header hit-rects filled during draw: [x, y, w, h]
+    pub hr_liq: [f64; 4],
+    pub hr_prof: [f64; 4],
+    pub hr_dom: [f64; 4],
+    /// MODE chip inside the ORDER BOOK header (Compact <-> Detailed)
+    pub hr_mode: [f64; 4],
+    /// mid-price change tracking for the current-price pill timer
+    pub last_mid: f64,
+    pub mid_since: f64,
     /// stats for the HTML overlay panel (computed during draw)
     pub vol_total: f64,
     pub profit: f64,
@@ -255,6 +284,16 @@ impl Default for BookView {
             show_candles: true,
             show_volume: true,
             show_trails: true,
+            col_liq: false,
+            col_prof: false,
+            col_dom: false,
+            dom_compact: false,
+            hr_liq: [0.0; 4],
+            hr_prof: [0.0; 4],
+            hr_dom: [0.0; 4],
+            hr_mode: [0.0; 4],
+            last_mid: 0.0,
+            mid_since: 0.0,
             vol_total: 0.0,
             profit: 0.0,
             px_now: 0.0,
@@ -343,6 +382,50 @@ impl BookView {
         if (self.intensity - v).abs() > 1e-6 {
             self.intensity = v;
         }
+    }
+
+    /// Expand every right rail back to full panels.
+    pub fn expand_all(&mut self) {
+        self.col_liq = false;
+        self.col_prof = false;
+        self.col_dom = false;
+        self.heat = None;
+    }
+
+    /// Handle a click on the terminal: returns true when a panel header (or
+    /// the ORDER BOOK mode chip / a collapsed rail) consumed it.
+    pub fn click(&mut self, x: f64, y: f64) -> bool {
+        let hit = |r: &[f64; 4]| {
+            r[2] > 0.0 && x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]
+        };
+        if hit(&self.hr_mode) {
+            self.dom_compact = !self.dom_compact;
+            return true;
+        }
+        if hit(&self.hr_dom) {
+            self.col_dom = !self.col_dom;
+            self.heat = None; // plot width changes -> full rebuild
+            return true;
+        }
+        if hit(&self.hr_liq) {
+            self.col_liq = !self.col_liq;
+            self.heat = None;
+            return true;
+        }
+        if hit(&self.hr_prof) {
+            self.col_prof = !self.col_prof;
+            self.heat = None;
+            return true;
+        }
+        false
+    }
+
+    /// True when (x, y) sits on a collapsible panel header (for the cursor).
+    pub fn header_hit(&self, x: f64, y: f64) -> bool {
+        let hit = |r: &[f64; 4]| {
+            r[2] > 0.0 && x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]
+        };
+        hit(&self.hr_dom) || hit(&self.hr_liq) || hit(&self.hr_prof) || hit(&self.hr_mode)
     }
 }
 
@@ -450,6 +533,96 @@ fn dash(ctx: &CanvasRenderingContext2d, on: bool, a: f64, b: f64) {
     let _ = ctx.set_line_dash(arr.as_ref());
 }
 
+/// TapeSurf-style collapsible panel header band: drag-grip dots, bold title,
+/// chevron pointing down (expanded) or right (collapsed). Returns the chevron
+/// x so callers can draw extra controls to its left.
+fn panel_header(
+    ctx: &CanvasRenderingContext2d,
+    x: f64,
+    y: f64,
+    w: f64,
+    title: &str,
+    expanded: bool,
+    hovered: bool,
+) {
+    ctx.set_fill_style_str(if hovered { "#13233a" } else { HDR_BG });
+    ctx.fill_rect(x, y, w, HDR_H);
+    ctx.set_stroke_style_str(HDR_LN);
+    ctx.set_line_width(1.0);
+    ctx.begin_path();
+    ctx.move_to(x, y + HDR_H + 0.5);
+    ctx.line_to(x + w, y + HDR_H + 0.5);
+    ctx.stroke();
+    // drag grip: two columns of three dots
+    ctx.set_fill_style_str("#3b526e");
+    for (dx, dy) in [(3.0, 4.0), (3.0, 8.0), (3.0, 12.0), (6.5, 4.0), (6.5, 8.0), (6.5, 12.0)] {
+        ctx.begin_path();
+        let _ = ctx.arc(x + dx, y + dy, 0.9, 0.0, std::f64::consts::TAU);
+        let _ = ctx.fill();
+    }
+    ctx.set_font(FONT_H);
+    ctx.set_fill_style_str("#8fb7d4");
+    ctx.set_text_align("left");
+    let _ = ctx.fill_text(title, x + 13.0, y + 12.0);
+    // chevron
+    let cx = x + w - 9.0;
+    let cy = y + HDR_H / 2.0;
+    ctx.set_stroke_style_str("#6d87a6");
+    ctx.set_line_width(1.4);
+    ctx.set_line_cap("round");
+    ctx.begin_path();
+    if expanded {
+        ctx.move_to(cx - 3.0, cy - 1.5);
+        ctx.line_to(cx, cy + 1.8);
+        ctx.line_to(cx + 3.0, cy - 1.5);
+    } else {
+        ctx.move_to(cx - 1.5, cy - 3.0);
+        ctx.line_to(cx + 1.8, cy);
+        ctx.line_to(cx - 1.5, cy + 3.0);
+    }
+    ctx.stroke();
+    ctx.set_line_cap("butt");
+}
+
+/// Collapsed rail: vertical rotated title + right-pointing chevron. The whole
+/// rail is the click target (rect returned via `rect`).
+fn panel_rail(
+    ctx: &CanvasRenderingContext2d,
+    x: f64,
+    y: f64,
+    h: f64,
+    title: &str,
+    hovered: bool,
+) {
+    ctx.set_fill_style_str(if hovered { "#13233a" } else { HDR_BG });
+    ctx.fill_rect(x, y, RAIL_W, h);
+    ctx.set_stroke_style_str(HDR_LN);
+    ctx.set_line_width(1.0);
+    ctx.stroke_rect(x + 0.5, y + 0.5, RAIL_W - 1.0, h - 1.0);
+    // rotated title, reading bottom -> top
+    ctx.save();
+    ctx.translate(x + RAIL_W / 2.0 + 3.0, y + h / 2.0);
+    ctx.rotate(-std::f64::consts::FRAC_PI_2);
+    ctx.set_font(FONT_H);
+    ctx.set_fill_style_str("#8fb7d4");
+    ctx.set_text_align("center");
+    let _ = ctx.fill_text(title, 0.0, 0.0);
+    ctx.restore();
+    ctx.set_text_align("left");
+    // chevron at the top of the rail
+    let cx = x + RAIL_W / 2.0;
+    let cy = y + 10.0;
+    ctx.set_stroke_style_str("#6d87a6");
+    ctx.set_line_width(1.4);
+    ctx.set_line_cap("round");
+    ctx.begin_path();
+    ctx.move_to(cx - 1.5, cy - 3.0);
+    ctx.line_to(cx + 1.8, cy);
+    ctx.line_to(cx - 1.5, cy + 3.0);
+    ctx.stroke();
+    ctx.set_line_cap("butt");
+}
+
 /// x position of a timestamp, snapped to the nearest sampled column
 /// (columns are index-spaced, not time-uniform, so overlays must follow
 /// the grid to stay aligned with the heatmap).
@@ -520,9 +693,35 @@ pub fn draw(
     let time_h = 32.0;
     let delta_h = if bv.show_delta { 54.0 } else { 0.0 };
     let axis_w = 70.0;
-    let liq_w = if bv.show_radar { 88.0 } else { 0.0 };
-    let prof_w = if bv.show_profile { 86.0 } else { 0.0 };
-    let dom_w = if bv.show_dom { (cw * 0.19).clamp(170.0, 300.0) } else { 0.0 };
+    let liq_w = if bv.show_radar {
+        if bv.col_liq {
+            RAIL_W
+        } else {
+            102.0
+        }
+    } else {
+        0.0
+    };
+    let prof_w = if bv.show_profile {
+        if bv.col_prof {
+            RAIL_W
+        } else {
+            98.0
+        }
+    } else {
+        0.0
+    };
+    let dom_w = if bv.show_dom {
+        if bv.col_dom {
+            RAIL_W
+        } else if bv.dom_compact {
+            (cw * 0.17).clamp(186.0, 250.0)
+        } else {
+            (cw * 0.22).clamp(232.0, 336.0)
+        }
+    } else {
+        0.0
+    };
     let plot_x = 0.0;
     let plot_w = (cw - liq_w - prof_w - axis_w - dom_w - 4.0).max(120.0);
     let plot_y = top_h;
@@ -544,6 +743,51 @@ pub fn draw(
         delta_h,
         time_y: ch - time_h,
     };
+
+    // ----- collapsible panel hit-rects (headers when open, whole rail when
+    // folded) + the MODE chip inside the ORDER BOOK header -----------------
+    let hov = |r: &[f64; 4]| {
+        bv.hover
+            .map(|(x, y)| r[2] > 0.0 && x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3])
+            .unwrap_or(false)
+    };
+    bv.hr_liq = if bv.show_radar {
+        if bv.col_liq {
+            [lay.liq_x, lay.y, RAIL_W, lay.h]
+        } else {
+            [lay.liq_x, lay.y, lay.liq_w, HDR_H]
+        }
+    } else {
+        [0.0; 4]
+    };
+    bv.hr_prof = if bv.show_profile {
+        if bv.col_prof {
+            [lay.prof_x, lay.y, RAIL_W, lay.h]
+        } else {
+            [lay.prof_x, lay.y, lay.prof_w, HDR_H]
+        }
+    } else {
+        [0.0; 4]
+    };
+    bv.hr_dom = if bv.show_dom {
+        if bv.col_dom {
+            [lay.dom_x, lay.y, RAIL_W, lay.h]
+        } else {
+            [lay.dom_x, lay.y, lay.dom_w, HDR_H]
+        }
+    } else {
+        [0.0; 4]
+    };
+    // MODE chip sits at the right of the ORDER BOOK header, left of chevron
+    bv.hr_mode = if bv.show_dom && !bv.col_dom {
+        [lay.dom_x + lay.dom_w - 78.0, lay.y + 2.0, 58.0, HDR_H - 4.0]
+    } else {
+        [0.0; 4]
+    };
+    let hov_liq = hov(&bv.hr_liq);
+    let hov_prof = hov(&bv.hr_prof);
+    let hov_dom = hov(&bv.hr_dom);
+    let hov_mode = hov(&bv.hr_mode);
 
     if bv.cols.is_empty() {
         ctx.set_fill_style_str(C_DIM);
@@ -751,6 +995,15 @@ pub fn draw(
         let (b1, a1) = book_totals(b, 0.01);
         let tot = b1 + a1;
         bv.imb = if tot > 0.0 { b1 / tot } else { 0.5 };
+        // mid-change timer for the ORDER BOOK current-price pill
+        let m = b.mid();
+        if bv.last_mid == 0.0 {
+            bv.last_mid = m;
+            bv.mid_since = js_sys::Date::now();
+        } else if m != bv.last_mid {
+            bv.last_mid = m;
+            bv.mid_since = js_sys::Date::now();
+        }
     }
     // cyan execution-flash columns behind everything
     draw_flashes(&ctx, &lay, &cnds, &t2x, candle_ms, col_w);
@@ -990,24 +1243,44 @@ pub fn draw(
     }
 
     // ----- volume profile -----------------------------------------------------
-    if bv.show_profile && lay.prof_w > 8.0 {
-        draw_profile(&ctx, &lay, &trades_all, first_t, px_lo, px_hi, &p2y);
+    if bv.show_profile && lay.prof_w > 0.0 {
+        if bv.col_prof {
+            panel_rail(&ctx, lay.prof_x, lay.y, lay.h, "PROFILE", hov_prof);
+        } else if lay.prof_w > 40.0 {
+            draw_profile(&ctx, &lay, &trades_all, first_t, px_lo, px_hi, &p2y, hov_prof);
+        }
     }
 
     // ----- LIQ LEVELS panel (green long / red short liquidation levels) ------
-    if bv.show_radar && lay.liq_w > 8.0 {
-        if let Some(rs) = radar {
-            if rs.coin == bv.coin {
-                draw_liq_levels(&ctx, &lay, rs);
+    if bv.show_radar && lay.liq_w > 0.0 {
+        if bv.col_liq {
+            panel_rail(&ctx, lay.liq_x, lay.y, lay.h, "LIQ LEVELS", hov_liq);
+        } else if lay.liq_w > 40.0 {
+            if let Some(rs) = radar {
+                if rs.coin == bv.coin {
+                    draw_liq_levels(&ctx, &lay, rs, hov_liq);
+                }
             }
         }
     }
 
     // ----- DOM ladder + depth --------------------------------------------------
-    if bv.show_dom && lay.dom_w > 120.0 {
-        if let Some(book) = bv.cur.as_ref() {
-            draw_dom(&ctx, &lay, book);
-            draw_depth(&ctx, &lay, book);
+    if bv.show_dom && lay.dom_w > 0.0 {
+        if bv.col_dom {
+            panel_rail(&ctx, lay.dom_x, lay.y, lay.h, "ORDER BOOK", hov_dom);
+        } else if lay.dom_w > 120.0 {
+            if let Some(book) = bv.cur.as_ref() {
+                draw_dom(
+                    &ctx,
+                    &lay,
+                    book,
+                    bv.dom_compact,
+                    hov_dom,
+                    hov_mode,
+                    bv.mid_since,
+                );
+                draw_depth(&ctx, &lay, book);
+            }
         }
     }
 
@@ -1356,25 +1629,23 @@ fn draw_radar(
 
 /// Right-hand LIQ LEVELS panel: horizontal bars of estimated forced-flow
 /// per price row — green = long liquidations, red = short liquidations —
-/// with LEVEL MAX / CUM MAX stats, like the reference screenshots.
-/// The panel maps its own wider price domain (levels within ±8% of the
-/// last price) so the full liquidation landscape stays visible even when
-/// the chart itself is zoomed tight around the traded range.
+/// with LEVEL MAX / CUM MAX stats and reference-style price pills on the
+/// biggest armed levels (solid price pill + "×hits" tag), like the
+/// screenshots. The panel maps its own wider price domain (levels within
+/// ±8% of the last price) so the full liquidation landscape stays visible
+/// even when the chart itself is zoomed tight around the traded range.
 fn draw_liq_levels(
     ctx: &CanvasRenderingContext2d,
     lay: &Lay,
     rs: &shared::RadarSnapshot,
+    hovered: bool,
 ) {
     let x0 = lay.liq_x + 3.0;
     let w_in = lay.liq_w - 6.0;
-    // header block (title + LEVEL MAX / CUM MAX per side)
-    let hdr_h = 64.0;
+    // collapsible header band
+    panel_header(ctx, lay.liq_x, lay.y, lay.liq_w, "LIQ LEVELS", true, hovered);
     ctx.set_fill_style_str("rgba(4,10,20,0.72)");
-    ctx.fill_rect(lay.liq_x, lay.y, lay.liq_w, lay.h);
-    ctx.set_font("bold 9px ui-monospace, SFMono-Regular, Menlo, monospace");
-    ctx.set_fill_style_str("#8fb7d4");
-    ctx.set_text_align("left");
-    let _ = ctx.fill_text("LIQ LEVELS", x0, lay.y + 12.0);
+    ctx.fill_rect(lay.liq_x, lay.y + HDR_H, lay.liq_w, lay.h - HDR_H);
 
     let mid = if rs.px > 0.0 { rs.px } else { return };
     // own domain: levels within ±8% of price, always containing the price
@@ -1388,12 +1659,16 @@ fn draw_liq_levels(
         dom_hi = dom_hi.max(lv.px);
     }
     let span = (dom_hi - dom_lo).max(1e-9);
-    let body_y = lay.y + hdr_h;
-    let body_h = (lay.h - hdr_h - 14.0).max(20.0);
+    let hdr_h = 64.0;
+    let body_y = lay.y + HDR_H + hdr_h;
+    let body_h = (lay.h - HDR_H - hdr_h - 14.0).max(20.0);
     let rows = ((body_h / 3.0) as usize).clamp(16, 220);
     let row_h = body_h / rows as f64;
     let mut long_rows = vec![0.0_f64; rows];
     let mut short_rows = vec![0.0_f64; rows];
+    // strongest armed level per side, for the price pills
+    let mut big_long: Option<&shared::RadarLevel> = None;
+    let mut big_short: Option<&shared::RadarLevel> = None;
     for lv in rs.levels.iter() {
         if lv.est_usd < 10_000.0 || lv.px < dom_lo || lv.px > dom_hi {
             continue;
@@ -1406,6 +1681,16 @@ fn draw_liq_levels(
                 short_rows[r] += lv.est_usd;
             }
         }
+        if lv.state != LevelState::Swept {
+            let take = |cur: &Option<&shared::RadarLevel>| {
+                cur.map_or(true, |c| lv.est_usd > c.est_usd)
+            };
+            if lv.long && take(&big_long) {
+                big_long = Some(lv);
+            } else if !lv.long && take(&big_short) {
+                big_short = Some(lv);
+            }
+        }
     }
     let max_l = long_rows.iter().cloned().fold(0.0_f64, f64::max);
     let max_s = short_rows.iter().cloned().fold(0.0_f64, f64::max);
@@ -1413,18 +1698,19 @@ fn draw_liq_levels(
     let cum_s: f64 = short_rows.iter().sum();
 
     // stats: two lines per side (LEVEL MAX + CUM MAX), green then red
+    let sy = lay.y + HDR_H;
     ctx.set_font("8px ui-monospace, SFMono-Regular, Menlo, monospace");
     ctx.set_fill_style_str("#34f0a0");
-    let _ = ctx.fill_text(&format!("LEVEL MAX {}", fmt_k(max_l)), x0, lay.y + 23.0);
-    let _ = ctx.fill_text(&format!("CUM MAX {}", fmt_k(cum_l)), x0, lay.y + 32.0);
+    let _ = ctx.fill_text(&format!("LEVEL MAX {}", fmt_k(max_l)), x0, sy + 11.0);
+    let _ = ctx.fill_text(&format!("CUM MAX {}", fmt_k(cum_l)), x0, sy + 20.0);
     ctx.set_fill_style_str("#ff5c72");
-    let _ = ctx.fill_text(&format!("LEVEL MAX {}", fmt_k(max_s)), x0, lay.y + 43.0);
-    let _ = ctx.fill_text(&format!("CUM MAX {}", fmt_k(cum_s)), x0, lay.y + 52.0);
+    let _ = ctx.fill_text(&format!("LEVEL MAX {}", fmt_k(max_s)), x0, sy + 31.0);
+    let _ = ctx.fill_text(&format!("CUM MAX {}", fmt_k(cum_s)), x0, sy + 40.0);
     // side markers + header separator
     ctx.set_fill_style_str("rgba(46,224,150,0.9)");
-    ctx.fill_rect(x0, lay.y + 58.0, 5.0, 3.0);
+    ctx.fill_rect(x0, sy + 46.0, 5.0, 3.0);
     ctx.set_fill_style_str("rgba(255,77,96,0.9)");
-    ctx.fill_rect(x0 + w_in - 5.0, lay.y + 58.0, 5.0, 3.0);
+    ctx.fill_rect(x0 + w_in - 5.0, sy + 46.0, 5.0, 3.0);
     ctx.set_stroke_style_str("#1a2942");
     ctx.set_line_width(1.0);
     ctx.begin_path();
@@ -1446,6 +1732,35 @@ fn draw_liq_levels(
             ctx.fill_rect(x0 + w_in - bw, y, bw, row_h.max(1.4));
         }
     }
+
+    // reference-style price pills on the biggest armed levels:
+    // solid side-coloured price pill + dark "×hits" tag beneath
+    let pill = |lv: &shared::RadarLevel, col: &str| {
+        let y = body_y + ((dom_hi - lv.px) / span * body_h).clamp(8.0, body_h - 20.0);
+        let txt = fmt_comma(lv.px);
+        let pw = (txt.len() as f64 * 5.8 + 8.0).min(w_in);
+        let py = y - 16.0;
+        ctx.set_font(FONT_P);
+        rounded_rect(ctx, x0 + w_in - pw, py, pw, 13.0, 3.0, col);
+        ctx.set_fill_style_str("#0a0d12");
+        ctx.set_text_align("center");
+        let _ = ctx.fill_text(&txt, x0 + w_in - pw / 2.0, py + 9.5);
+        // ×hits tag (like the reference "B1x87")
+        let tag = format!("×{}", lv.hits.max(1));
+        let tw = tag.len() as f64 * 5.4 + 6.0;
+        rounded_rect(ctx, x0 + w_in - tw, py + 14.0, tw, 11.0, 3.0, "#101a26");
+        ctx.set_fill_style_str(col);
+        let _ = ctx.fill_text(&tag, x0 + w_in - tw / 2.0, py + 22.5);
+        ctx.set_text_align("left");
+        ctx.set_font(FONT);
+    };
+    if let Some(lv) = big_long.filter(|lv| lv.est_usd > 50_000.0) {
+        pill(lv, "rgba(34,196,120,0.95)");
+    }
+    if let Some(lv) = big_short.filter(|lv| lv.est_usd > 50_000.0) {
+        pill(lv, "rgba(228,52,80,0.95)");
+    }
+
     // current-price tick across the panel (orients longs below / shorts above)
     let py = body_y + ((dom_hi - mid) / span * body_h).clamp(4.0, body_h - 4.0);
     ctx.set_stroke_style_str("rgba(125,211,252,0.75)");
@@ -1476,8 +1791,13 @@ fn draw_profile(
     px_lo: f64,
     px_hi: f64,
     p2y: &dyn Fn(f64) -> f64,
+    hovered: bool,
 ) {
-    let rows = ((lay.h / 3.0) as usize).clamp(24, 260);
+    // collapsible header band
+    panel_header(ctx, lay.prof_x, lay.y, lay.prof_w, "PROFILE", true, hovered);
+    let top = lay.y + HDR_H;
+    let body_h = lay.h - HDR_H;
+    let rows = ((body_h / 3.0) as usize).clamp(24, 260);
     let span = (px_hi - px_lo).max(1e-9);
     let mut buy = vec![0.0_f64; rows];
     let mut sell = vec![0.0_f64; rows];
@@ -1494,6 +1814,30 @@ fn draw_profile(
             }
         }
     }
+    let traded: f64 = buy.iter().zip(sell.iter()).map(|(b, s)| b + s).sum();
+    let delta: f64 = buy.iter().zip(sell.iter()).map(|(b, s)| b - s).sum();
+    let row_max = buy
+        .iter()
+        .zip(sell.iter())
+        .map(|(b, s)| b + s)
+        .fold(0.0_f64, f64::max);
+    // TapeSurf-style stat header: TRADED / ROW MAX / Δ (+%)
+    ctx.set_font("8px ui-monospace, SFMono-Regular, Menlo, monospace");
+    let x0 = lay.prof_x + 3.0;
+    ctx.set_fill_style_str("#8fb7d4");
+    let _ = ctx.fill_text(&format!("TRADED {}", fmt_k(traded)), x0, top + 10.0);
+    let _ = ctx.fill_text(&format!("ROW MAX {}", fmt_k(row_max)), x0, top + 19.0);
+    let pct = if traded > 0.0 {
+        delta / traded * 100.0
+    } else {
+        0.0
+    };
+    ctx.set_fill_style_str(if delta >= 0.0 { "#34f0a0" } else { "#ff5c72" });
+    let _ = ctx.fill_text(
+        &format!("Δ {}{} · {:.1}%", if delta >= 0.0 { "+" } else { "-" }, fmt_k(delta.abs()), pct),
+        x0,
+        top + 28.0,
+    );
     let max_side = buy
         .iter()
         .chain(sell.iter())
@@ -1501,9 +1845,9 @@ fn draw_profile(
         .fold(0.0_f64, f64::max)
         .max(1.0);
     let mid_x = lay.prof_x + lay.prof_w * 0.5;
-    let row_h = lay.h / rows as f64;
+    let row_h = body_h / rows as f64;
     for r in 0..rows {
-        let y = lay.y + r as f64 * row_h;
+        let y = top + r as f64 * row_h;
         let bw = buy[r] / max_side * (lay.prof_w * 0.5 - 4.0);
         let sw = sell[r] / max_side * (lay.prof_w * 0.5 - 4.0);
         if bw > 0.4 {
@@ -1516,7 +1860,7 @@ fn draw_profile(
         }
     }
     // POC + value area
-    let total: f64 = buy.iter().zip(sell.iter()).map(|(b, s)| b + s).sum();
+    let total: f64 = traded;
     if total > 0.0 {
         let mut order: Vec<usize> = (0..rows).collect();
         order.sort_by(|&a, &b| {
@@ -1558,7 +1902,7 @@ fn draw_profile(
             if ty - prev_text_y < 11.0 {
                 ty = prev_text_y + 11.0;
             }
-            ty = ty.clamp(lay.y + 9.0, lay.y + lay.h - 3.0);
+            ty = ty.clamp(top + 9.0, lay.y + lay.h - 3.0);
             prev_text_y = ty;
             ctx.set_stroke_style_str(if col == "#ffffff" {
                 "rgba(255,255,255,0.65)"
@@ -1583,78 +1927,258 @@ fn draw_profile(
     ctx.set_font(FONT);
 }
 
-fn draw_dom(ctx: &CanvasRenderingContext2d, lay: &Lay, book: &BookCol) {
-    let row_h = 15.0;
-    let rows_per_side = (((lay.h * 0.44) / row_h) as usize).clamp(4, 26);
-    let asks: Vec<&shared::BookLevel> = book.asks.iter().take(rows_per_side).collect();
-    let bids: Vec<&shared::BookLevel> = book.bids.iter().take(rows_per_side).collect();
+/// TapeSurf-style ORDER BOOK panel — the live limit-order ladder.
+/// Detailed mode: direction glyphs, price column, depth bars with the USD
+/// size inside, order-count chips (Hyperliquid reports the aggregated order
+/// count per level, the on-chain equivalent of the reference's venue
+/// chips), a blue cumulative-depth staircase along the right edge, a
+/// bids/asks % split header, MAX stat, bottom $-scale labels and a
+/// highlighted current-price pill with a time-at-price timer.
+/// Compact mode: tight rows, no chips / staircase / scale.
+fn draw_dom(
+    ctx: &CanvasRenderingContext2d,
+    lay: &Lay,
+    book: &BookCol,
+    compact: bool,
+    hovered: bool,
+    hovered_mode: bool,
+    mid_since: f64,
+) {
+    let x0 = lay.dom_x;
+    let w = lay.dom_w;
+    // ----- header band + MODE chip ----------------------------------------
+    panel_header(ctx, x0, lay.y, w, "ORDER BOOK", true, hovered);
+    let mode_txt = if compact { "COMPACT" } else { "DETAILED" };
+    let mw = 58.0;
+    let mx = x0 + w - 14.0 - mw;
+    rounded_rect(
+        ctx,
+        mx,
+        lay.y + 2.5,
+        mw,
+        HDR_H - 5.0,
+        3.0,
+        if hovered_mode { "#1b3250" } else { "#101d2e" },
+    );
+    ctx.set_font(FONT_S);
+    ctx.set_fill_style_str("#9fc0dd");
+    ctx.set_text_align("center");
+    let _ = ctx.fill_text(mode_txt, mx + mw / 2.0, lay.y + 12.0);
+    ctx.set_text_align("left");
+    // GROUP hint left of the MODE chip
+    ctx.set_fill_style_str("#4c617a");
+    let _ = ctx.fill_text("GROUP auto", x0 + 64.0, lay.y + 12.0);
+    ctx.set_font(FONT);
+
+    let top = lay.y + HDR_H;
+    // ----- column header row: PRICE | LEVEL USD | MAX ----------------------
+    let (b1, a1) = book_totals(book, 0.01);
+    let tot = b1 + a1;
+    let asks: Vec<&shared::BookLevel> = book.asks.iter().take(34).collect();
+    let bids: Vec<&shared::BookLevel> = book.bids.iter().take(34).collect();
     let max_usd = asks
         .iter()
         .chain(bids.iter())
         .map(|l| l.px * l.sz)
         .fold(1.0_f64, f64::max);
-    let bar_w = lay.dom_w * 0.5;
-    let px_col = lay.dom_x + 6.0;
-    let bar_col = px_col + 68.0;
 
-    ctx.set_font(FONT_B);
-    ctx.set_fill_style_str(C_DIM);
+    let px_col_w = 62.0;
+    let glyph_w = 9.0;
+    let bar_x = x0 + glyph_w + px_col_w + 6.0;
+    let stair_w = if compact { 0.0 } else { 40.0 };
+    let bar_w = (w - (bar_x - x0) - stair_w - 8.0).max(20.0);
+
+    ctx.set_font(FONT_S);
+    ctx.set_fill_style_str("#5b6b80");
+    let _ = ctx.fill_text("PRICE", x0 + glyph_w + 2.0, top + 9.0);
+    ctx.set_text_align("right");
+    let _ = ctx.fill_text("LEVEL USD", bar_x + bar_w.min(70.0), top + 9.0);
+    if !compact {
+        ctx.set_fill_style_str("#4c617a");
+        let _ = ctx.fill_text(&format!("MAX {}", fmt_k(max_usd)), x0 + w - 6.0, top + 9.0);
+    }
     ctx.set_text_align("left");
-    let _ = ctx.fill_text("ORDER BOOK · live L2", lay.dom_x + 6.0, lay.y + 11.0);
-    ctx.set_font(FONT);
 
-    // asks: worst at top, best adjacent to the spread
-    let mut y = lay.y + 18.0;
-    for l in asks.iter().rev() {
-        let usd = l.px * l.sz;
-        let w = usd / max_usd * bar_w;
-        ctx.set_fill_style_str("rgba(229,72,77,0.72)");
-        ctx.fill_rect(bar_col, y, w, row_h - 2.0);
-        if usd >= max_usd * 0.999 {
-            ctx.set_stroke_style_str("#ff8f93");
-            ctx.stroke_rect(bar_col, y, w, row_h - 2.0);
-        }
-        ctx.set_fill_style_str("#ff9b9f");
+    // ----- bids / asks % split bar -----------------------------------------
+    let imb = if tot > 0.0 { b1 / tot } else { 0.5 };
+    let split_y = top + 12.0;
+    let bp = (imb * 100.0).round();
+    ctx.set_fill_style_str("rgba(31,200,150,0.85)");
+    ctx.fill_rect(x0 + 3.0, split_y, (w - 6.0) * imb, 10.0);
+    ctx.set_fill_style_str("rgba(229,72,77,0.85)");
+    ctx.fill_rect(x0 + 3.0 + (w - 6.0) * imb, split_y, (w - 6.0) * (1.0 - imb), 10.0);
+    ctx.set_font(FONT_S);
+    ctx.set_fill_style_str("#04150d");
+    if (w - 6.0) * imb > 62.0 {
+        let _ = ctx.fill_text(&format!("bids {:.0}%", bp), x0 + 6.0, split_y + 7.5);
+    }
+    if (w - 6.0) * (1.0 - imb) > 58.0 {
         ctx.set_text_align("right");
-        let _ = ctx.fill_text(&fmt_px(l.px), px_col + 62.0, y + 10.0);
-        ctx.set_fill_style_str(C_TXT);
+        let _ = ctx.fill_text(&format!("{:.0}% asks", 100.0 - bp), x0 + w - 6.0, split_y + 7.5);
         ctx.set_text_align("left");
-        let _ = ctx.fill_text(&fmt_k(usd), bar_col + 4.0, y + 10.0);
+    }
+
+    // ----- ladder rows ------------------------------------------------------
+    let row_h = if compact { 13.0 } else { 15.0 };
+    let ladder_top = split_y + 14.0;
+    // reserve room for the depth chart pinned to the panel bottom
+    let depth_room = if lay.h - (split_y + 14.0 - lay.y) >= 242.0 { 96.0 } else { 8.0 };
+    let ladder_h = lay.h - (ladder_top - lay.y) - depth_room;
+    let spread_h = 22.0;
+    let rows_per_side = (((ladder_h - spread_h) * 0.5 / row_h) as usize)
+        .clamp(4, 30)
+        .min(asks.len())
+        .min(bids.len());
+    let asks: Vec<&shared::BookLevel> = asks.into_iter().take(rows_per_side).collect();
+    let bids: Vec<&shared::BookLevel> = bids.into_iter().take(rows_per_side).collect();
+    // cumulative depth measured from the spread outward (staircase source):
+    // prefix[k] = sum of the best k levels of the side
+    let prefix = |side: &[&shared::BookLevel]| -> Vec<f64> {
+        let mut v = Vec::with_capacity(side.len() + 1);
+        let mut c = 0.0_f64;
+        v.push(0.0);
+        for l in side.iter() {
+            c += l.px * l.sz;
+            v.push(c);
+        }
+        v
+    };
+    let ask_pre = prefix(&asks);
+    let bid_pre = prefix(&bids);
+
+    // one row painter; returns the (y, usd) for the staircase
+    let mut row = |l: &shared::BookLevel, is_bid: bool, y: f64| -> (f64, f64) {
+        let usd = l.px * l.sz;
+        let bw = (usd / max_usd * bar_w).max(1.0);
+        let (bar_col, hot_col, px_col) = if is_bid {
+            ("rgba(31,200,150,0.72)", "#4ef0be", "#67e8c3")
+        } else {
+            ("rgba(229,72,77,0.72)", "#ff8f93", "#ff9b9f")
+        };
+        // depth bar
+        ctx.set_fill_style_str(bar_col);
+        ctx.fill_rect(bar_x, y, bw, row_h - 2.0);
+        if usd >= max_usd * 0.999 {
+            ctx.set_stroke_style_str(hot_col);
+            ctx.set_line_width(1.0);
+            ctx.stroke_rect(bar_x, y, bw, row_h - 2.0);
+        }
+        // direction glyph (asks point up away from mid, bids down)
+        ctx.set_fill_style_str(if is_bid { "#2f9e7c" } else { "#b04a55" });
+        ctx.set_font("8px ui-monospace, SFMono-Regular, Menlo, monospace");
+        let _ = ctx.fill_text(if is_bid { "▼" } else { "▲" }, x0 + 2.0, y + row_h - 5.0);
+        // price
+        ctx.set_fill_style_str(px_col);
+        ctx.set_text_align("right");
+        let _ = ctx.fill_text(&fmt_px(l.px), x0 + glyph_w + px_col_w, y + row_h - 5.0);
+        ctx.set_text_align("left");
+        // USD size: inside the bar when it fits, else just past its tip
+        let sz_txt = fmt_k(usd);
+        ctx.set_font(FONT);
+        let fits = bw > sz_txt.len() as f64 * 6.2 + 6.0;
+        if fits {
+            ctx.set_fill_style_str("#0a0f16");
+            let _ = ctx.fill_text(&sz_txt, bar_x + 4.0, y + row_h - 5.0);
+        } else {
+            ctx.set_fill_style_str(C_TXT);
+            let _ = ctx.fill_text(&sz_txt, bar_x + bw + 4.0, y + row_h - 5.0);
+        }
+        // order-count chip (limit orders aggregated at this price)
+        if !compact && l.n >= 2.0 {
+            let chip = format!("×{}", l.n as u32);
+            let cw2 = chip.len() as f64 * 5.6 + 7.0;
+            let cx = bar_x + bw + (if fits { sz_txt.len() as f64 * 6.2 + 8.0 } else { 0.0 });
+            if cx + cw2 < bar_x + bar_w + stair_w {
+                rounded_rect(ctx, cx, y + 1.5, cw2, row_h - 5.0, 3.0, "#0f1a28");
+                ctx.set_fill_style_str("#8fb7d4");
+                ctx.set_font(FONT_S);
+                let _ = ctx.fill_text(&chip, cx + 3.5, y + row_h - 5.5);
+                ctx.set_font(FONT);
+            }
+        }
+        (y + row_h / 2.0, usd)
+    };
+
+    // asks: worst at top, best adjacent to the spread.
+    // staircase point per row: cumulative depth from the spread outward
+    let mut y = ladder_top;
+    let mut stair: Vec<(f64, f64)> = Vec::new(); // (row center y, cum-from-mid usd)
+    let n_ask = asks.len();
+    for (i, l) in asks.iter().rev().enumerate() {
+        let _ = row(l, false, y);
+        // drawn row i (worst-first) is asks[n_ask-1-i]: cum = ask_pre[n_ask-i]
+        stair.push((y + row_h / 2.0, ask_pre[n_ask - i]));
         y += row_h;
     }
-    // spread row
+    // spread / current-price row (teal pill + time-at-price timer)
     let best_bid = book.bids.first().map(|l| l.px).unwrap_or(0.0);
     let best_ask = book.asks.first().map(|l| l.px).unwrap_or(0.0);
     let mid = (best_bid + best_ask) / 2.0;
+    let since_s = ((js_sys::Date::now() - mid_since).max(0.0) / 1000.0) as i64;
+    let timer = format!("{}:{:02}", since_s / 60, since_s % 60);
     ctx.set_fill_style_str("rgba(20,32,46,0.95)");
-    ctx.fill_rect(lay.dom_x + 2.0, y, lay.dom_w - 6.0, row_h + 1.0);
-    ctx.set_font(FONT_B);
-    ctx.set_fill_style_str("#7dd3fc");
+    ctx.fill_rect(x0 + 2.0, y, w - 6.0, spread_h);
+    let pill_txt = fmt_px(mid);
+    let pw = pill_txt.len() as f64 * 6.2 + 12.0;
+    rounded_rect(ctx, x0 + glyph_w + 2.0, y + 2.0, pw, 13.0, 3.0, "#0e7f8f");
+    ctx.set_fill_style_str("#eafcff");
+    ctx.set_font(FONT_P);
+    ctx.set_text_align("center");
+    let _ = ctx.fill_text(&pill_txt, x0 + glyph_w + 2.0 + pw / 2.0, y + 11.5);
     ctx.set_text_align("left");
+    ctx.set_font(FONT_S);
+    ctx.set_fill_style_str("#7dd3fc");
     let _ = ctx.fill_text(
-        &format!("{}  Δ{}bp", fmt_px(mid), book.spread_bps().round()),
-        px_col,
-        y + 11.0,
+        &format!("Δ{:.1}bp", book.spread_bps()),
+        x0 + glyph_w + pw + 10.0,
+        y + 11.5,
     );
-    ctx.set_font(FONT);
-    y += row_h + 2.0;
-    // bids: best just below the spread
-    for l in bids.iter() {
-        let usd = l.px * l.sz;
-        let w = usd / max_usd * bar_w;
-        ctx.set_fill_style_str("rgba(31,200,150,0.72)");
-        ctx.fill_rect(bar_col, y, w, row_h - 2.0);
-        if usd >= max_usd * 0.999 {
-            ctx.set_stroke_style_str("#4ef0be");
-            ctx.stroke_rect(bar_col, y, w, row_h - 2.0);
-        }
-        ctx.set_fill_style_str("#67e8c3");
-        ctx.set_text_align("right");
-        let _ = ctx.fill_text(&fmt_px(l.px), px_col + 62.0, y + 10.0);
-        ctx.set_fill_style_str(C_TXT);
-        ctx.set_text_align("left");
-        let _ = ctx.fill_text(&fmt_k(usd), bar_col + 4.0, y + 10.0);
+    let _ = ctx.fill_text(&timer, x0 + w - 34.0, y + 11.5);
+    ctx.set_fill_style_str("#4c617a");
+    let _ = ctx.fill_text("at price", x0 + w - 82.0, y + 11.5);
+    y += spread_h + 2.0;
+    // bids: best just below the spread (cum-from-mid = bid_pre[i+1])
+    for (i, l) in bids.iter().enumerate() {
+        let _ = row(l, true, y);
+        stair.push((y + row_h / 2.0, bid_pre[i + 1]));
         y += row_h;
+    }
+
+    // ----- cumulative-depth staircase (blue, reference style) ---------------
+    // both sides grow away from the spread row: x = sx + (cum/stair_max) * sw
+    if !compact && stair.len() >= 2 {
+        let stair_max = ask_pre
+            .last()
+            .copied()
+            .unwrap_or(1.0)
+            .max(bid_pre.last().copied().unwrap_or(1.0))
+            .max(1.0);
+        ctx.set_stroke_style_str("#3d8fd9");
+        ctx.set_line_width(1.2);
+        ctx.begin_path();
+        let sx = bar_x + bar_w + 6.0;
+        let sw = stair_w - 10.0;
+        for (i, (sy, c)) in stair.iter().enumerate() {
+            let x = sx + (c / stair_max).min(1.0) * sw;
+            if i == 0 {
+                ctx.move_to(x, *sy);
+            } else {
+                ctx.line_to(x, *sy);
+            }
+        }
+        ctx.stroke();
+    }
+
+    // ----- bottom $ scale labels --------------------------------------------
+    if !compact {
+        let sy = ladder_top + ladder_h - 1.0;
+        ctx.set_font(FONT_S);
+        ctx.set_fill_style_str("#46586c");
+        let half = max_usd * 0.5;
+        let _ = ctx.fill_text(&format!("${}", fmt_k(half)), bar_x + bar_w * 0.5 - 12.0, sy);
+        ctx.set_text_align("right");
+        let _ = ctx.fill_text(&format!("${}", fmt_k(max_usd)), bar_x + bar_w, sy);
+        ctx.set_text_align("left");
     }
     ctx.set_text_align("left");
 }

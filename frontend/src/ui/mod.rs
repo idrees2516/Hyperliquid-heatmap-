@@ -128,14 +128,17 @@ pub fn tape_row_html(t: &LiveTrade) -> String {
 // ---------------------------------------------------------------------------
 
 pub fn liq_row_html(l: &LiveLiquidation) -> String {
-    let dir = if l.long { "LONG" } else { "SHORT" };
+    let dir = if l.long { "LONG LIQ" } else { "SHORT LIQ" };
     let cls = if l.long { "long" } else { "short" };
+    // TapeSurf-style: side pill + solid price tag + gold size chip
     format!(
         "<div class='liq-row fresh'><span class='t'>{}</span><span class='c'>{}</span>\
-         <span class='dir {cls}'>{dir}</span><span class='amt'>{}</span>\
+         <span class='dir {cls}'>{dir}</span><span class='pxp {cls}'>{}</span>\
+         <span class='amt'>{}</span>\
          <a href='{SCAN}{}' target='_blank' title='liquidated @ {}'>{}</a></div>",
         ms_hms(l.t),
         l.coin,
+        fmt_px(l.px),
         fmt_usd(l.usd),
         l.user,
         fmt_px(l.px),
