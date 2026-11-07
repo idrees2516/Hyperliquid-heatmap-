@@ -115,6 +115,9 @@ Book data pipeline: the coin you watch is subscribed to Hyperliquid's
 `l2Book` WS channel *and* polled over REST (~2 Hz) to densify the map (the
 public WS pushes snapshots only every few seconds); snapshots are sampled
 into a ~48-minute column ring per coin and streamed to the browser.
+Columns are stamped with the local arrival clock — Hyperliquid
+intermittently returns `time: null` on book frames, and mixing the venue
+clock with the local one stalls the 400 ms sampling cadence.
 
 **Warm-up & density** — the map is a history, not an instant snapshot: a
 heat column lands every 400 ms, so the plot fills in over time and a

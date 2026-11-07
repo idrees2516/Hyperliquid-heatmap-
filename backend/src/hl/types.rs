@@ -155,8 +155,26 @@ pub struct HlBookLevel {
 #[derive(Debug, Clone, Deserialize)]
 pub struct HlBook {
     pub coin: String,
-    pub time: i64,
+    /// upstream book time — HL intermittently returns `null` here
+    /// (observed on both REST and WS frames); callers fall back to the
+    /// local wall clock
+    #[serde(default, deserialize_with = "de_opt_i64")]
+    pub time: Option<i64>,
     pub levels: HlBookSides,
+}
+
+/// tolerant i64 decoder: numbers, numeric strings and null all accepted
+fn de_opt_i64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+    use serde::de::Error;
+    let v = serde_json::Value::deserialize(d)?;
+    match v {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Number(n) => Ok(n.as_i64()),
+        serde_json::Value::String(s) => s.parse::<i64>().ok().map(Some).ok_or_else(|| {
+            D::Error::custom(format!("invalid book time string: {s}"))
+        }),
+        other => Err(D::Error::custom(format!("invalid book time: {other}"))),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -529,7 +529,13 @@ impl AppState {
         let bs = self.get_or_create_book(&b.coin);
         let (col, push_live, live) = {
             let mut g = bs.lock().unwrap();
-            let (col, push_live) = g.on_snapshot(b.time, bids, asks);
+            // Always stamp with the local arrival clock: HL intermittently
+            // nulls the book time, and mixing the venue clock with the local
+            // one stalls the 400 ms sampling cadence (a local-clock frame
+            // following a venue-clock frame can look < 400 ms older). Columns
+            // are index-spaced in the UI, so arrival time is all we need.
+            let t = now_ms();
+            let (col, push_live) = g.on_snapshot(t, bids, asks);
             (col, push_live, g.live_book())
         };
         if let Some(c) = col {
