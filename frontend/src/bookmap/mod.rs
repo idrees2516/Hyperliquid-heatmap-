@@ -520,7 +520,7 @@ pub fn draw(
     let time_h = 32.0;
     let delta_h = if bv.show_delta { 54.0 } else { 0.0 };
     let axis_w = 70.0;
-    let liq_w = if bv.show_radar { 78.0 } else { 0.0 };
+    let liq_w = if bv.show_radar { 88.0 } else { 0.0 };
     let prof_w = if bv.show_profile { 86.0 } else { 0.0 };
     let dom_w = if bv.show_dom { (cw * 0.19).clamp(170.0, 300.0) } else { 0.0 };
     let plot_x = 0.0;
@@ -738,6 +738,7 @@ pub fn draw(
         300_000
     };
     let cnds = build_candles(&trades_all, first_t, candle_ms);
+    let cnds_1m = build_candles(&trades_all, first_t, 60_000);
     bv.vol_total = cnds.iter().map(|c| c.buy + c.sell).sum();
     bv.profit = trades_all
         .iter()
@@ -811,8 +812,8 @@ pub fn draw(
                 }
                 ctx.stroke();
             };
-            step("rgba(6,10,18,0.65)", 3.2);
-            step(YELLOW, 1.5);
+            step("rgba(6,10,18,0.78)", 4.2);
+            step(YELLOW, 2.0);
         }
     }
 
@@ -983,7 +984,9 @@ pub fn draw(
 
     // ----- volume histogram strip (TapeSurf bottom bars) ----------------------
     if bv.show_volume {
-        draw_volume_strip(&ctx, &lay, &cnds, &t2x, candle_ms, col_w);
+        // per-minute bars regardless of the candle timeframe: the reference
+        // keeps a dense volume tape even when candles widen
+        draw_volume_strip(&ctx, &lay, &cnds_1m, &t2x, col_w);
     }
 
     // ----- volume profile -----------------------------------------------------
@@ -1054,13 +1057,13 @@ pub fn draw(
         }
     }
 
-    // ----- live-volume chip (bottom-right of the heat, clear of the panels) ----
+    // ----- live-volume chip (TapeSurf-style, right end of the time tape) ------
     {
         let pulse = 0.5 + 0.5 * ((js_sys::Date::now() / 700.0).sin());
         let label = format!("Vol {} · live", fmt_k(bv.vol_total));
         let tw = label.len() as f64 * 5.4;
-        let cx = (lay.x + lay.w - tw - 18.0).max(lay.x + 40.0);
-        let cy = lay.y + lay.h - 12.0;
+        let cx = (lay.x + lay.w - tw - 16.0).max(lay.x + 40.0);
+        let cy = lay.time_y + 17.0;
         ctx.set_fill_style_str(&format!("rgba(52,240,160,{:.2})", 0.35 + 0.6 * pulse));
         ctx.begin_path();
         let _ = ctx.arc(cx, cy, 3.0, 0.0, std::f64::consts::TAU);
@@ -1188,7 +1191,7 @@ fn draw_grid_and_axes(
     while i < vis_n {
         let c = &cols[skip + i];
         let x = lay.w - (vis_n - i) as f64 * col_w;
-        if x > lay.x + 34.0 && x < lay.x + lay.w - 34.0 {
+        if x > lay.x + 34.0 && x < lay.x + lay.w - 118.0 {
             ctx.set_stroke_style_str(GRID);
             ctx.begin_path();
             ctx.move_to(x, lay.y);
@@ -1980,13 +1983,13 @@ fn draw_candles(
     }
 }
 
-/// thin volume histogram along the bottom of the plot (red / teal bars)
+/// thin volume histogram along the bottom of the plot (red / teal bars);
+/// buckets are always 1 minute so the tape stays dense at every zoom
 fn draw_volume_strip(
     ctx: &CanvasRenderingContext2d,
     lay: &Lay,
     cnds: &[Cnd],
     t2x: &dyn Fn(i64) -> f64,
-    candle_ms: i64,
     col_w: f64,
 ) {
     if cnds.is_empty() {
@@ -1994,7 +1997,7 @@ fn draw_volume_strip(
     }
     let strip_h = 34.0_f64;
     let base_y = lay.y + lay.h;
-    let candle_cols = (candle_ms / 400).max(1) as f64;
+    let candle_cols = (60_000 / 400).max(1) as f64;
     let bar_w = (candle_cols * col_w * 0.62).clamp(1.6, 9.0);
     let max_vol = cnds
         .iter()
@@ -2002,7 +2005,7 @@ fn draw_volume_strip(
         .fold(1e-9_f64, f64::max);
     let max_sq = max_vol.sqrt();
     for c in cnds {
-        let xc = t2x(c.t0 + candle_ms / 2);
+        let xc = t2x(c.t0 + 30_000);
         if xc < lay.x - 8.0 || xc > lay.x + lay.w + 8.0 {
             continue;
         }
