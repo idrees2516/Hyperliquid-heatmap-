@@ -1963,21 +1963,17 @@ fn draw_candles(
         ctx.move_to(xc, yh);
         ctx.line_to(xc, yl);
         ctx.stroke();
-        // body (semi-transparent so the heat reads through)
+        // body (mostly opaque with a dark rim so it pops off bright heat)
         let by0 = yo.min(yc);
         let bh = (yc - yo).abs().max(1.2);
         ctx.set_fill_style_str(if up {
-            "rgba(23,211,161,0.82)"
+            "rgba(23,211,161,0.92)"
         } else {
-            "rgba(255,77,94,0.82)"
+            "rgba(255,77,94,0.92)"
         });
         ctx.fill_rect(xc - body_w / 2.0, by0, body_w, bh);
-        ctx.set_stroke_style_str(if up {
-            "rgba(23,211,161,0.95)"
-        } else {
-            "rgba(255,77,94,0.95)"
-        });
-        ctx.set_line_width(0.8);
+        ctx.set_stroke_style_str("rgba(4,10,14,0.85)");
+        ctx.set_line_width(1.0);
         ctx.stroke_rect(xc - body_w / 2.0, by0, body_w, bh);
         let _ = col;
     }
